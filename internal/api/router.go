@@ -76,13 +76,29 @@ func (s *Server) HandleProviderListModels(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) writeModelsResponse(w http.ResponseWriter, modelNames []string) {
-	var resp openai.ModelsList
+	type modelResponse struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Created int64  `json:"created"`
+		OwnedBy string `json:"owned_by"`
+	}
+
+	type listResponse struct {
+		Object string          `json:"object"`
+		Data   []modelResponse `json:"data"`
+	}
+
+	resp := listResponse{
+		Object: "list",
+		Data:   make([]modelResponse, 0, len(modelNames)),
+	}
+
 	for _, name := range modelNames {
-		resp.Models = append(resp.Models, openai.Model{
-			ID:        name,
-			Object:    "model",
-			CreatedAt: time.Now().Unix(),
-			OwnedBy:   "omniproxy",
+		resp.Data = append(resp.Data, modelResponse{
+			ID:      name,
+			Object:  "model",
+			Created: time.Now().Unix(),
+			OwnedBy: "omniproxy",
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

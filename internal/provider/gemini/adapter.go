@@ -1,6 +1,8 @@
 package gemini
 
 import (
+	"time"
+
 	"github.com/sashabaranov/go-openai"
 	"google.golang.org/genai"
 )
@@ -59,48 +61,106 @@ func ToGeminiRequest(req openai.ChatCompletionRequest) (*genai.Content, []*genai
 	return systemInstruction, contents, config, nil
 }
 
+// finishReasonMap maps Gemini finish reasons to OpenAI finish reasons
+var finishReasonMap = map[genai.FinishReason]openai.FinishReason{
+	genai.FinishReasonStop:        openai.FinishReasonStop,
+	genai.FinishReasonMaxTokens:   openai.FinishReasonLength,
+	genai.FinishReasonSafety:      openai.FinishReasonContentFilter,
+	genai.FinishReasonRecitation:  openai.FinishReasonContentFilter,
+	genai.FinishReasonLanguage:    openai.FinishReasonContentFilter,
+	genai.FinishReasonBlocklist:   openai.FinishReasonContentFilter,
+	genai.FinishReasonOther:       openai.FinishReasonStop,
+	genai.FinishReasonUnspecified: openai.FinishReasonStop,
+}
+
 // FromGeminiResponse converts Gemini response to OpenAI response
 func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *openai.ChatCompletionResponse {
-	content := ""
+	created := time.Now().Unix()
+	if !resp.CreateTime.IsZero() {
+		created = resp.CreateTime.Unix()
+	}
+
+	var content string
+	var finishReason openai.FinishReason = openai.FinishReasonStop
+
 	if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
 		parts := resp.Candidates[0].Content.Parts
 		for _, p := range parts {
 			content += p.Text
 		}
+		// Get finish reason from candidate
+		if resp.Candidates[0].FinishReason != "" {
+			if mapped, ok := finishReasonMap[resp.Candidates[0].FinishReason]; ok {
+				finishReason = mapped
+			}
+		}
+	}
+
+	responseID := resp.ResponseID
+	if responseID == "" {
+		responseID = "chatcmpl-gemini"
+	}
+
+	choices := []openai.ChatCompletionChoice{
+		{
+			Index: 0,
+			Message: openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleAssistant,
+				Content: content,
+			},
+			FinishReason: finishReason,
+		},
+	}
+
+	usage := openai.Usage{}
+	if resp.UsageMetadata != nil {
+		usage.PromptTokens = int(resp.UsageMetadata.PromptTokenCount)
+		usage.CompletionTokens = int(resp.UsageMetadata.CandidatesTokenCount)
+		usage.TotalTokens = int(resp.UsageMetadata.PromptTokenCount + resp.UsageMetadata.CandidatesTokenCount)
 	}
 
 	return &openai.ChatCompletionResponse{
-		ID:      "chatcmpl-gemini", // Generate UUID?
+		ID:      responseID,
 		Object:  "chat.completion",
-		Created: 0, // Current time?
+		Created: created,
 		Model:   model,
-		Choices: []openai.ChatCompletionChoice{
-			{
-				Index: 0,
-				Message: openai.ChatCompletionMessage{
-					Role:    openai.ChatMessageRoleAssistant,
-					Content: content,
-				},
-				FinishReason: openai.FinishReasonStop, // Map finish reason properly
-			},
-		},
+		Choices: choices,
+		Usage:   usage,
 	}
 }
 
 // FromGeminiChunk converts Gemini stream chunk to OpenAI chunk
 func FromGeminiChunk(resp *genai.GenerateContentResponse, model string) *openai.ChatCompletionStreamResponse {
-	content := ""
+	created := time.Now().Unix()
+	if !resp.CreateTime.IsZero() {
+		created = resp.CreateTime.Unix()
+	}
+
+	var content string
+	var finishReason openai.FinishReason = openai.FinishReasonNull
+
 	if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
 		parts := resp.Candidates[0].Content.Parts
 		for _, p := range parts {
 			content += p.Text
 		}
+		// Only set finish reason if we have one (non-null)
+		if resp.Candidates[0].FinishReason != "" && resp.Candidates[0].FinishReason != genai.FinishReasonUnspecified {
+			if mapped, ok := finishReasonMap[resp.Candidates[0].FinishReason]; ok {
+				finishReason = mapped
+			}
+		}
+	}
+
+	responseID := resp.ResponseID
+	if responseID == "" {
+		responseID = "chatcmpl-gemini"
 	}
 
 	return &openai.ChatCompletionStreamResponse{
-		ID:      "chatcmpl-gemini",
+		ID:      responseID,
 		Object:  "chat.completion.chunk",
-		Created: 0,
+		Created: created,
 		Model:   model,
 		Choices: []openai.ChatCompletionStreamChoice{
 			{
@@ -108,7 +168,7 @@ func FromGeminiChunk(resp *genai.GenerateContentResponse, model string) *openai.
 				Delta: openai.ChatCompletionStreamChoiceDelta{
 					Content: content,
 				},
-				FinishReason: openai.FinishReasonNull,
+				FinishReason: finishReason,
 			},
 		},
 	}

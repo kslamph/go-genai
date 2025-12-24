@@ -6,6 +6,7 @@ replace google.golang.org/genai => github.com/kslamph/go-genai v0.0.0-2025122400
 
 require (
 	cloud.google.com/go/auth v0.18.0
+	github.com/go-chi/chi/v5 v5.2.3
 	github.com/gofrs/flock v0.12.1
 	github.com/sashabaranov/go-openai v1.41.2
 	go.uber.org/zap v1.27.0
