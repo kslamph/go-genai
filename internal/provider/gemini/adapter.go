@@ -113,4 +113,3 @@ func FromGeminiChunk(resp *genai.GenerateContentResponse, model string) *openai.
 		},
 	}
 }
-

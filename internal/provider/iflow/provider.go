@@ -78,3 +78,16 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 
 	return respChan, errChan
 }
+
+func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
+	return []string{
+		"qwen3-coder-plus",
+		"qwen3-max",
+		"qwen3-vl-plus",
+		"kimi-k2-0905",
+		"kimi-k2",
+		"glm-4.6",
+		"deepseek-v3.2",
+		"deepseek-r1",
+	}, nil
+}

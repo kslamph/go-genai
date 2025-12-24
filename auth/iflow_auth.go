@@ -23,13 +23,13 @@ import (
 
 const (
 	// OAuth constants from reference/iflow.rs
-	IFlowAuthURL     = "https://iflow.cn/oauth"
-	IFlowTokenURL    = "https://iflow.cn/oauth/token"
-	IFlowUserInfoURL = "https://iflow.cn/api/oauth/getUserInfo"
-	IFlowAPIKeyURL   = "https://platform.iflow.cn/api/openapi/apikey"
-	IFlowClientID    = "10009311001"
+	IFlowAuthURL      = "https://iflow.cn/oauth"
+	IFlowTokenURL     = "https://iflow.cn/oauth/token"
+	IFlowUserInfoURL  = "https://iflow.cn/api/oauth/getUserInfo"
+	IFlowAPIKeyURL    = "https://platform.iflow.cn/api/openapi/apikey"
+	IFlowClientID     = "10009311001"
 	IFlowClientSecret = "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW"
-	IFlowDefaultPort = 11451
+	IFlowDefaultPort  = 11451
 )
 
 // IFlowOAuthConfig holds the OAuth configuration for iFlow
@@ -54,7 +54,7 @@ func DefaultIFlowOAuthConfig() *IFlowOAuthConfig {
 
 // IFlowCredentials represents the stored OAuth credentials for iFlow
 type IFlowCredentials struct {
-	AuthType        string `json:"auth_type"`        // "oauth" or "cookie"
+	AuthType        string `json:"auth_type"` // "oauth" or "cookie"
 	AccessToken     string `json:"access_token,omitempty"`
 	RefreshToken    string `json:"refresh_token,omitempty"`
 	Expire          string `json:"expire,omitempty"`
@@ -253,17 +253,17 @@ func (a *IFlowAuthenticator) GetToken(ctx context.Context) (string, error) {
 		// Fetch user info and API key after refresh
 		if err := a.fetchUserInfo(); err != nil {
 			a.logger.Errorw("Failed to fetch user info after refresh",
-			"provider", "iFlow",
-			"error", err)
+				"provider", "iFlow",
+				"error", err)
 		} else {
 			a.logger.Infow("User info and API key updated successfully",
-			"provider", "iFlow")
+				"provider", "iFlow")
 		}
 
 		if err := a.saveCredentials(); err != nil {
 			a.logger.Errorw("Failed to save refreshed credentials",
-			"provider", "iFlow",
-			"error", err)
+				"provider", "iFlow",
+				"error", err)
 		}
 	}
 
@@ -271,8 +271,8 @@ func (a *IFlowAuthenticator) GetToken(ctx context.Context) (string, error) {
 	if a.credentials.APIKey == "" {
 		if err := a.fetchUserInfo(); err != nil {
 			a.logger.Errorw("Failed to fetch API key",
-			"provider", "iFlow",
-			"error", err)
+				"provider", "iFlow",
+				"error", err)
 		} else {
 			a.saveCredentials()
 		}
@@ -397,8 +397,8 @@ func (a *IFlowAuthenticator) loadCredentials() {
 	if a.credentials.APIKey == "" && a.credentials.AccessToken != "" {
 		if err := a.fetchUserInfo(); err != nil {
 			a.logger.Debugw("Failed to fetch user info during load",
-			"provider", "iFlow",
-			"error", err)
+				"provider", "iFlow",
+				"error", err)
 		}
 	}
 }
@@ -527,12 +527,12 @@ func (a *IFlowAuthenticator) waitForCallback() (*IFlowOAuthCallbackResult, error
 	}
 
 	a.logger.Infow("Please open the following URL in your browser",
-			"provider", "iFlow",
-			"url", authURL)
+		"provider", "iFlow",
+		"url", authURL)
 	a.logger.Infow("After authorization, you will be redirected to a page showing the authorization code",
-			"provider", "iFlow")
+		"provider", "iFlow")
 	a.logger.Infow("Please copy the authorization code from the URL parameter 'code' and provide it to continue",
-			"provider", "iFlow")
+		"provider", "iFlow")
 
 	// For now, return an error indicating manual intervention is needed
 	return nil, fmt.Errorf("manual OAuth flow requires user interaction - please implement full OAuth server for automated flow")

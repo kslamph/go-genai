@@ -74,3 +74,10 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 
 	return respChan, errChan
 }
+
+func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
+	return []string{
+		"qwen3-coder-plus",
+		"qwen3-coder-flash",
+	}, nil
+}

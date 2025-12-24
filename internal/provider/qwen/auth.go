@@ -12,17 +12,16 @@ import (
 
 	"github.com/gofrs/flock"
 	"golang.org/x/oauth2"
-	"go.uber.org/zap"
 )
 
 // Qwen OAuth constants
 const (
-	DefaultBaseURL     = "https://portal.qwen.ai/v1"
+	DefaultBaseURL       = "https://portal.qwen.ai/v1"
 	TokenRefreshBufferMs = 1800 * 1000 // 30 minutes
-	OAuthTokenURL      = "https://chat.qwen.ai/api/v1/oauth2/token"
-	OAuthClientID      = "f0304373b74a44d2b584a3fb70ca9e56"
-	OAuthScope         = "openid profile email model.completion"
-	OAuthDeviceAuthURL = "https://chat.qwen.ai/api/v1/oauth2/device/code"
+	OAuthTokenURL        = "https://chat.qwen.ai/api/v1/oauth2/token"
+	OAuthClientID        = "f0304373b74a44d2b584a3fb70ca9e56"
+	OAuthScope           = "openid profile email model.completion"
+	OAuthDeviceAuthURL   = "https://chat.qwen.ai/api/v1/oauth2/device/code"
 )
 
 // OAuthConfig holds the OAuth configuration for Qwen
@@ -60,8 +59,8 @@ type Authenticator struct {
 	config      *OAuthConfig
 	credentials *Credentials
 	mu          sync.RWMutex
-	logger      *zap.SugaredLogger
-	httpClient  *http.Client
+
+	httpClient *http.Client
 }
 
 // NewAuthenticator creates a new Qwen authenticator
@@ -70,8 +69,8 @@ func NewAuthenticator(config *OAuthConfig) *Authenticator {
 		config = DefaultOAuthConfig()
 	}
 	return &Authenticator{
-		config:     config,
-		logger:     zap.NewExample().Sugar(),
+		config: config,
+
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }

@@ -221,10 +221,10 @@ func (a *GeminiAuthenticator) GetToken(ctx context.Context) (string, error) {
 	if newToken.AccessToken != a.credentials.AccessToken || newToken.RefreshToken != a.credentials.RefreshToken {
 		a.logger.Infow("Token refreshed successfully, saving credentials",
 			"provider", "Gemini")
-		
+
 		a.credentials.AccessToken = newToken.AccessToken
 		// ReuseTokenSource ensures RefreshToken is preserved if not returned
-		a.credentials.RefreshToken = newToken.RefreshToken 
+		a.credentials.RefreshToken = newToken.RefreshToken
 		a.credentials.TokenType = newToken.TokenType
 		a.credentials.ExpiryDate = newToken.Expiry.Unix()
 		// Scope might update
@@ -260,16 +260,16 @@ func (a *GeminiAuthenticator) ForceRefresh(ctx context.Context) error {
 	// Actually, we can just call GetToken but we need to ensure it refreshes.
 	// Since GetToken now has buffer logic, if we want to FORCE it even if valid > 30m?
 	// Yes, ForceRefresh implies ignoring validity.
-	
+
 	// Temporarily expire the token in memory
 	originalExpiry := a.credentials.ExpiryDate
 	a.credentials.ExpiryDate = time.Now().Add(-1 * time.Hour).Unix()
-	
-	// Unlock to call GetToken (which locks) - wait, GetToken locks. 
+
+	// Unlock to call GetToken (which locks) - wait, GetToken locks.
 	// We are holding the lock. We cannot call GetToken.
 	// We have to duplicate the refresh logic or refactor.
 	// Refactoring: extract refresh logic.
-	
+
 	token := &oauth2.Token{
 		AccessToken:  a.credentials.AccessToken,
 		RefreshToken: a.credentials.RefreshToken,
@@ -289,7 +289,7 @@ func (a *GeminiAuthenticator) ForceRefresh(ctx context.Context) error {
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, a.httpClient)
 	ts := conf.TokenSource(ctx, token)
 	newToken, err := ts.Token()
-	
+
 	if err != nil {
 		a.credentials.ExpiryDate = originalExpiry // Restore if failed
 		return fmt.Errorf("failed to refresh token: %w", err)
@@ -299,15 +299,15 @@ func (a *GeminiAuthenticator) ForceRefresh(ctx context.Context) error {
 	a.credentials.RefreshToken = newToken.RefreshToken
 	a.credentials.TokenType = newToken.TokenType
 	a.credentials.ExpiryDate = newToken.Expiry.Unix()
-	
+
 	if err := a.saveCredentials(a.credentials); err != nil {
 		a.logger.Errorw("Failed to save refreshed credentials",
 			"provider", "Gemini",
 			"error", err)
 	}
-	
+
 	a.logger.Infow("Token forced refresh successful",
-			"provider", "Gemini")
+		"provider", "Gemini")
 	return nil
 }
 
@@ -445,6 +445,6 @@ func (a *GeminiAuthenticator) exchangeCodeForTokens(ctx context.Context, code, r
 	}
 
 	a.logger.Debugw("Authentication successful, credentials saved",
-			"provider", "Gemini")
+		"provider", "Gemini")
 	return nil
 }

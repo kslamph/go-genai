@@ -11,8 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sunbankio/omniproxy/pkg/utils"
+
 	"golang.org/x/oauth2"
-	"go.uber.org/zap"
 )
 
 const (
@@ -57,8 +58,8 @@ type Authenticator struct {
 	config      *OAuthConfig
 	credentials *Credentials
 	mu          sync.RWMutex
-	logger      *zap.SugaredLogger
-	httpClient  *http.Client
+
+	httpClient *http.Client
 }
 
 // NewAuthenticator creates a new Kiro authenticator
@@ -67,8 +68,8 @@ func NewAuthenticator(config *OAuthConfig) *Authenticator {
 		config = DefaultOAuthConfig()
 	}
 	return &Authenticator{
-		config:     config,
-		logger:     zap.NewExample().Sugar(),
+		config: config,
+
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -251,7 +252,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	// Check buffer (30 mins)
 	buffer := time.Duration(TokenRefreshBufferMs) * time.Millisecond
 	if time.Until(token.Expiry) < buffer {
-		a.logger.Infow("Token expiring in less than 30m or expired, forcing refresh",
+		utils.L().Infow("Token expiring in less than 30m or expired, forcing refresh",
 			"provider", "Kiro")
 		token.Expiry = time.Now().Add(-1 * time.Second)
 	}
@@ -262,7 +263,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	// Get token (this triggers refresh if expired)
 	newToken, err := ts.Token()
 	if err != nil {
-		a.logger.Errorw("Failed to refresh token",
+		utils.L().Errorw("Failed to refresh token",
 			"provider", "Kiro",
 			"error", err)
 		return "", err
@@ -270,14 +271,14 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 
 	// Update credentials if changed
 	if newToken.AccessToken != a.credentials.AccessToken || newToken.RefreshToken != a.credentials.RefreshToken {
-		a.logger.Infow("Token refreshed successfully, saving credentials",
+		utils.L().Infow("Token refreshed successfully, saving credentials",
 			"provider", "Kiro")
 		a.credentials.AccessToken = newToken.AccessToken
 		a.credentials.RefreshToken = newToken.RefreshToken
 		a.credentials.ExpiresAt = newToken.Expiry.Format(time.RFC3339)
 
 		if err := a.saveCredentials(a.credentials); err != nil {
-			a.logger.Errorw("Failed to save refreshed credentials",
+			utils.L().Errorw("Failed to save refreshed credentials",
 				"provider", "Kiro",
 				"error", err)
 		}

@@ -69,3 +69,15 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 
 	return respChan, errChan
 }
+
+func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
+	resp, err := p.client.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var models []string
+	for _, m := range resp.Models {
+		models = append(models, m.ID)
+	}
+	return models, nil
+}

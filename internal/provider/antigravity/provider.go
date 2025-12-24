@@ -7,16 +7,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	cloudauth "cloud.google.com/go/auth"
 	"github.com/sashabaranov/go-openai"
 	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/internal/provider/gemini"
+	"github.com/sunbankio/omniproxy/pkg/utils"
 	"google.golang.org/genai"
 )
 
 const (
 	AntigravityBaseURL = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+	APIVersion         = "v1internal"
+	DefaultUserAgent   = "antigravity/1.11.5 windows/amd64"
 )
 
 type AntigravityProvider struct {
@@ -122,54 +126,128 @@ func (p *AntigravityProvider) StreamChatCompletion(ctx context.Context, req open
 	return respChan, errChan
 }
 
-// discoverProjectID helps find the project ID needed for API
-func discoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
-	token, err := authenticator.GetToken(ctx)
+func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) {
+	fallbackModels := []string{
+		"gemini-2.5-computer-use-preview-10-2025",
+		"gemini-3-pro-image-preview",
+		"gemini-3-pro-preview",
+		"gemini-3-flash",
+		"gemini-2.5-flash",
+		"gemini-claude-sonnet-4-5",
+		"gemini-claude-sonnet-4-5-thinking",
+		"gemini-claude-opus-4-5-thinking",
+	}
+
+	token, err := p.auth.GetToken(ctx)
 	if err != nil {
-		return "", err
+		utils.L().Warnf("Failed to get token for Antigravity models: %v", err)
+		return fallbackModels, nil
 	}
 
-	clientMetadata := map[string]interface{}{
-		"ideType":    "IDE_UNSPECIFIED",
-		"platform":   "PLATFORM_UNSPECIFIED",
-		"pluginType": "GEMINI",
-	}
-
-	loadRequest := map[string]interface{}{
-		"cloudaicompanionProject": "",
-		"metadata":                clientMetadata,
-	}
-
-	reqBody, _ := json.Marshal(loadRequest)
-	url := fmt.Sprintf("%s/v1internal:loadCodeAssist", baseURL)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+	url := fmt.Sprintf("%s/%s:fetchAvailableModels", AntigravityBaseURL, APIVersion)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
-		return "", err
+		return fallbackModels, nil
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", DefaultUserAgent)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		utils.L().Warnf("Error calling fetchAvailableModels: %v", err)
+		return fallbackModels, nil
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("loadCodeAssist failed (%d): %s", resp.StatusCode, string(body))
+		utils.L().Warnf("fetchAvailableModels failed (%d): %s", resp.StatusCode, string(body))
+		return fallbackModels, nil
 	}
 
-	var loadResponse map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&loadResponse); err != nil {
-		return "", err
+	var rawResponse map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&rawResponse); err != nil {
+		utils.L().Warnf("Failed to decode Antigravity models: %v", err)
+		return fallbackModels, nil
 	}
 
-	if projectID, ok := loadResponse["cloudaicompanionProject"].(string); ok && projectID != "" {
-		return projectID, nil
+	var models []string
+	if modelsData, exists := rawResponse["models"]; exists {
+		if modelsMap, ok := modelsData.(map[string]interface{}); ok {
+			for modelID := range modelsMap {
+				name := strings.TrimPrefix(modelID, "models/")
+				models = append(models, name)
+			}
+		}
 	}
 
-	return "", fmt.Errorf("failed to discover project ID")
+	if len(models) > 0 {
+		return models, nil
+	}
+
+	return fallbackModels, nil
+}
+// discoverProjectID helps find the project ID needed for API
+func discoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		token, err := authenticator.GetToken(ctx)
+		if err != nil {
+			return "", err
+		}
+
+		clientMetadata := map[string]interface{}{
+			"ideType":    "IDE_UNSPECIFIED",
+			"platform":   "PLATFORM_UNSPECIFIED",
+			"pluginType": "GEMINI",
+		}
+
+		loadRequest := map[string]interface{}{
+			"cloudaicompanionProject": "",
+			"metadata":                clientMetadata,
+		}
+
+		reqBody, _ := json.Marshal(loadRequest)
+		url := fmt.Sprintf("%s/v1internal:loadCodeAssist", baseURL)
+		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return "", err
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
+			_ = resp.Body.Close()
+			if err := authenticator.ForceRefresh(ctx); err != nil {
+				return "", fmt.Errorf("failed to force refresh token: %w", err)
+			}
+			continue
+		}
+
+		defer func() {
+			_ = resp.Body.Close()
+		}()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return "", fmt.Errorf("loadCodeAssist failed (%d): %s", resp.StatusCode, string(body))
+		}
+
+		var loadResponse map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&loadResponse); err != nil {
+			return "", err
+		}
+
+		if projectID, ok := loadResponse["cloudaicompanionProject"].(string); ok && projectID != "" {
+			return projectID, nil
+		}
+
+		return "", fmt.Errorf("failed to discover project ID: response missing project ID")
+	}
+	return "", fmt.Errorf("failed to discover project ID after retries")
 }

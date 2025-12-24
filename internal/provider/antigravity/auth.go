@@ -14,9 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sunbankio/omniproxy/pkg/utils"
+
 	cloudauth "cloud.google.com/go/auth"
 	"golang.org/x/oauth2"
-	"go.uber.org/zap"
 )
 
 const (
@@ -58,8 +59,8 @@ type Authenticator struct {
 	config      *OAuthConfig
 	credentials *Credentials
 	mu          sync.RWMutex
-	logger      *zap.SugaredLogger
-	httpClient  *http.Client
+
+	httpClient *http.Client
 }
 
 // NewAuthenticator creates a new Antigravity authenticator
@@ -68,8 +69,8 @@ func NewAuthenticator(config *OAuthConfig) *Authenticator {
 		config = DefaultOAuthConfig()
 	}
 	return &Authenticator{
-		config:     config,
-		logger:     zap.NewExample().Sugar(),
+		config: config,
+
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -199,7 +200,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 			a.credentials.Scope = extraScope
 		}
 		if err := a.saveCredentials(a.credentials); err != nil {
-			a.logger.Errorw("Failed to save credentials", "error", err)
+			utils.L().Errorw("Failed to save credentials", "error", err)
 		}
 	}
 
@@ -249,7 +250,7 @@ func (a *Authenticator) ForceRefresh(ctx context.Context) error {
 	a.credentials.ExpiryDate = newToken.Expiry.Unix()
 
 	if err := a.saveCredentials(a.credentials); err != nil {
-		a.logger.Errorw("Failed to save credentials", "error", err)
+		utils.L().Errorw("Failed to save credentials", "error", err)
 	}
 	return nil
 }

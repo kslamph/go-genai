@@ -14,9 +14,10 @@ import (
 	"sync"
 	"time"
 
-	cloudauth "cloud.google.com/go/auth"
-	"go.uber.org/zap"
+	"github.com/sunbankio/omniproxy/pkg/utils"
 	"golang.org/x/oauth2"
+
+	cloudauth "cloud.google.com/go/auth"
 )
 
 const (
@@ -58,7 +59,6 @@ type Authenticator struct {
 	config      *OAuthConfig
 	credentials *Credentials
 	mu          sync.RWMutex
-	logger      *zap.SugaredLogger
 	httpClient  *http.Client
 }
 
@@ -69,7 +69,6 @@ func NewAuthenticator(config *OAuthConfig) *Authenticator {
 	}
 	return &Authenticator{
 		config:     config,
-		logger:     zap.NewExample().Sugar(),
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -200,7 +199,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 
 	// Check if we need to force refresh (if within buffer or expired)
 	if time.Until(token.Expiry) < buffer {
-		a.logger.Infow("Token expiring in less than 30m or expired, forcing refresh",
+		utils.L().Infow("Token expiring in less than 30m or expired, forcing refresh",
 			"provider", "Gemini")
 		// Trick ReuseTokenSource by making the token look expired
 		token.Expiry = time.Now().Add(-1 * time.Second)
@@ -212,7 +211,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	// Get token (this will refresh if needed/forced)
 	newToken, err := ts.Token()
 	if err != nil {
-		a.logger.Errorw("Token refresh failed",
+		utils.L().Errorw("Token refresh failed",
 			"provider", "Gemini",
 			"error", err)
 		// Clear creds on failure so we retry/reload next time
@@ -222,7 +221,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 
 	// Check if token changed or was refreshed
 	if newToken.AccessToken != a.credentials.AccessToken || newToken.RefreshToken != a.credentials.RefreshToken {
-		a.logger.Infow("Token refreshed successfully, saving credentials",
+		utils.L().Infow("Token refreshed successfully, saving credentials",
 			"provider", "Gemini")
 
 		a.credentials.AccessToken = newToken.AccessToken
@@ -236,7 +235,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 		}
 
 		if err := a.saveCredentials(a.credentials); err != nil {
-			a.logger.Errorw("Failed to save refreshed credentials",
+			utils.L().Errorw("Failed to save refreshed credentials",
 				"provider", "Gemini",
 				"error", err)
 		}
@@ -288,12 +287,12 @@ func (a *Authenticator) ForceRefresh(ctx context.Context) error {
 	a.credentials.ExpiryDate = newToken.Expiry.Unix()
 
 	if err := a.saveCredentials(a.credentials); err != nil {
-		a.logger.Errorw("Failed to save refreshed credentials",
+		utils.L().Errorw("Failed to save refreshed credentials",
 			"provider", "Gemini",
 			"error", err)
 	}
 
-	a.logger.Infow("Token forced refresh successful",
+	utils.L().Infow("Token forced refresh successful",
 		"provider", "Gemini")
 	return nil
 }
@@ -433,7 +432,7 @@ func (a *Authenticator) exchangeCodeForTokens(ctx context.Context, code, redirec
 		return fmt.Errorf("failed to save credentials: %w", err)
 	}
 
-	a.logger.Debugw("Authentication successful, credentials saved",
+	utils.L().Debugw("Authentication successful, credentials saved",
 		"provider", "Gemini")
 	return nil
 }

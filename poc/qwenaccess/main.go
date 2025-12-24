@@ -13,7 +13,7 @@ func main() {
 	ctx := context.Background()
 
 	fmt.Println("=== Testing Qwen LLM Access ===")
-	
+
 	// Initialize Qwen authenticator
 	qwenAuth := auth.NewQwenAuthenticator(nil)
 
@@ -42,7 +42,7 @@ func main() {
 
 	// Test with qwen3-coder-flash model
 	model := "qwen3-coder-flash"
-	
+
 	// Test 1: Simple completion
 	fmt.Printf("\nTesting simple completion with model: %s\n", model)
 	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
@@ -54,7 +54,7 @@ func main() {
 			},
 		},
 	})
-	
+
 	if err != nil {
 		log.Printf("Chat completion failed: %v", err)
 		return
@@ -67,7 +67,7 @@ func main() {
 	// Test 2: Streaming completion
 	fmt.Printf("\nTesting streaming completion with model: %s\n", model)
 	fmt.Print("Streamed Response: ")
-	
+
 	stream, err := client.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
 		Model: model,
 		Messages: []openai.ChatCompletionMessage{
@@ -77,7 +77,7 @@ func main() {
 			},
 		},
 	})
-	
+
 	if err != nil {
 		log.Printf("Stream creation failed: %v", err)
 		return
@@ -90,7 +90,7 @@ func main() {
 			log.Printf("Stream failed: %v", err)
 			break
 		}
-		
+
 		if len(resp.Choices) > 0 {
 			fmt.Print(resp.Choices[0].Delta.Content)
 		}
@@ -108,7 +108,7 @@ func main() {
 			},
 		},
 	})
-	
+
 	if err != nil {
 		log.Printf("Code generation failed: %v", err)
 		return

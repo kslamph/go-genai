@@ -19,15 +19,15 @@ func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-    
-    // Clone the request to avoid race conditions
-    newReq := req.Clone(req.Context())
+
+	// Clone the request to avoid race conditions
+	newReq := req.Clone(req.Context())
 	newReq.Header.Set("Authorization", "Bearer "+token)
-    
-    transport := t.Transport
-    if transport == nil {
-        transport = http.DefaultTransport
-    }
-    
+
+	transport := t.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+
 	return transport.RoundTrip(newReq)
 }

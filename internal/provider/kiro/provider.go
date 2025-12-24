@@ -213,12 +213,24 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 						},
 					}
 				}
-                // Handle invalidStateEvent or others?
+				// Handle invalidStateEvent or others?
 			}
 		}
 	}()
 
 	return respChan, errChan
+}
+
+func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
+	return []string{
+		"claude-opus-4-5",
+		"claude-opus-4-5-20251101",
+		"claude-haiku-4-5",
+		"claude-sonnet-4-5",
+		"claude-sonnet-4-5-20250929",
+		"claude-sonnet-4-20250514",
+		"claude-3-7-sonnet-20250219",
+	}, nil
 }
 
 // Helpers
@@ -267,17 +279,17 @@ func parseEventStream(data []byte) (string, error) {
 			payload := data[payloadStart:payloadEnd]
 			var event map[string]interface{}
 			if err := json.Unmarshal(payload, &event); err == nil {
-                // Check different event types
+				// Check different event types
 				if content, ok := event["content"].(string); ok {
-                    // For non-streaming generateAssistantResponse, it usually returns one event with 'content'
+					// For non-streaming generateAssistantResponse, it usually returns one event with 'content'
 					fullContent += content
 				} else if delta, ok := event["contentDelta"].(string); ok {
-                    fullContent += delta
-                } else if message, ok := event["assistantResponseMessage"].(map[string]interface{}); ok {
-                     if c, ok := message["content"].(string); ok {
-                         fullContent += c
-                     }
-                }
+					fullContent += delta
+				} else if message, ok := event["assistantResponseMessage"].(map[string]interface{}); ok {
+					if c, ok := message["content"].(string); ok {
+						fullContent += c
+					}
+				}
 			}
 		}
 		offset += int(totalLen)

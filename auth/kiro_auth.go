@@ -299,8 +299,8 @@ func (a *KiroAuthenticator) GetToken(ctx context.Context) (string, error) {
 
 		if err := a.saveCredentials(a.credentials); err != nil {
 			a.logger.Errorw("Failed to save refreshed credentials",
-			"provider", "Kiro",
-			"error", err)
+				"provider", "Kiro",
+				"error", err)
 		}
 	}
 
@@ -421,7 +421,7 @@ func (a *KiroAuthenticator) Authenticate(ctx context.Context) error {
 	}
 
 	a.logger.Debugw("Authentication successful using existing credentials",
-			"provider", "Kiro")
+		"provider", "Kiro")
 	return nil
 }
 

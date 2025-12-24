@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -19,4 +20,7 @@ type Provider interface {
 	// StreamChatCompletion handles a streaming chat request
 	// It returns a channel that emits chunks.
 	StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error)
+
+	// ListModels returns a list of models supported by the provider
+	ListModels(ctx context.Context) ([]string, error)
 }

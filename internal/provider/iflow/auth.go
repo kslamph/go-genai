@@ -12,7 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"go.uber.org/zap"
+	"github.com/sunbankio/omniproxy/pkg/utils"
+
 	"golang.org/x/oauth2"
 )
 
@@ -111,8 +112,8 @@ type Authenticator struct {
 	config      *OAuthConfig
 	credentials *Credentials
 	mu          sync.RWMutex
-	logger      *zap.SugaredLogger
-	httpClient  *http.Client
+
+	httpClient *http.Client
 }
 
 // NewAuthenticator creates a new iFlow authenticator
@@ -121,8 +122,8 @@ func NewAuthenticator(config *OAuthConfig) *Authenticator {
 		config = DefaultOAuthConfig()
 	}
 	return &Authenticator{
-		config:     config,
-		logger:     zap.NewExample().Sugar(),
+		config: config,
+
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -307,7 +308,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 
 	// Update credentials if token changed
 	if newToken.AccessToken != a.credentials.AccessToken || newToken.RefreshToken != a.credentials.RefreshToken {
-		a.logger.Infow("Token refreshed successfully, saving credentials",
+		utils.L().Infow("Token refreshed successfully, saving credentials",
 			"provider", "iFlow")
 
 		a.credentials.AccessToken = newToken.AccessToken
@@ -320,13 +321,13 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 
 		// Fetch user info and API key after refresh
 		if err := a.fetchUserInfo(); err != nil {
-			a.logger.Errorw("Failed to fetch user info after refresh",
+			utils.L().Errorw("Failed to fetch user info after refresh",
 				"provider", "iFlow",
 				"error", err)
 		}
 
 		if err := a.saveCredentials(); err != nil {
-			a.logger.Errorw("Failed to save refreshed credentials",
+			utils.L().Errorw("Failed to save refreshed credentials",
 				"provider", "iFlow",
 				"error", err)
 		}
@@ -335,7 +336,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	// If we still don't have an API key, try to fetch it
 	if a.credentials.APIKey == "" {
 		if err := a.fetchUserInfo(); err != nil {
-			a.logger.Errorw("Failed to fetch API key",
+			utils.L().Errorw("Failed to fetch API key",
 				"provider", "iFlow",
 				"error", err)
 		} else {

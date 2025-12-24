@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
-	"golang.org/x/oauth2"
 	"go.uber.org/zap"
+	"golang.org/x/oauth2"
 )
 
 // Qwen OAuth constants
@@ -33,23 +33,23 @@ const (
 
 // QwenOAuthConfig holds the OAuth configuration for Qwen
 type QwenOAuthConfig struct {
-	ClientID     string
-	Scope        string
-	TokenURL     string
+	ClientID      string
+	Scope         string
+	TokenURL      string
 	DeviceAuthURL string
-	CredsDir     string
-	CredsFile    string
+	CredsDir      string
+	CredsFile     string
 }
 
 // DefaultQwenOAuthConfig returns the default Qwen OAuth configuration
 func DefaultQwenOAuthConfig() *QwenOAuthConfig {
 	return &QwenOAuthConfig{
-		ClientID:     QwenOAuthClientID,
-		Scope:        QwenOAuthScope,
-		TokenURL:     QwenOAuthTokenURL,
+		ClientID:      QwenOAuthClientID,
+		Scope:         QwenOAuthScope,
+		TokenURL:      QwenOAuthTokenURL,
 		DeviceAuthURL: QwenOAuthDeviceAuthURL,
-		CredsDir:     ".qwen",
-		CredsFile:    "qwenproxy_creds.json",
+		CredsDir:      ".qwen",
+		CredsFile:     "qwenproxy_creds.json",
 	}
 }
 
@@ -298,7 +298,7 @@ func (a *QwenAuthenticator) authenticateWithDeviceFlow() error {
 
 	// Try to open the verification URI in the browser
 	if err := a.openBrowser(verificationURL); err != nil {
-		a.logger.Warnw("Failed to open browser automatically", 
+		a.logger.Warnw("Failed to open browser automatically",
 			"error", err,
 			"url", verificationURL)
 	}
