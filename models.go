@@ -22,6 +22,7 @@ import (
 	"iter"
 	"net/http"
 	"reflect"
+	"strings"
 )
 
 func blobToMldev(fromObject map[string]any, parentObject map[string]any) (toObject map[string]any, err error) {
@@ -4057,6 +4058,12 @@ func (m Models) generateContent(ctx context.Context, model string, contents []*C
 	if m.apiClient.clientConfig.Backend == BackendVertexAI {
 		toConverter = generateContentParametersToVertex
 		fromConverter = generateContentResponseFromVertex
+	} else if m.apiClient.clientConfig.Backend == BackendGeminiCLI {
+		toConverter = generateContentParametersToGeminiCLI
+		fromConverter = generateContentResponseFromGeminiCLI
+	} else if m.apiClient.clientConfig.Backend == BackendAntigravity {
+		toConverter = generateContentParametersToAntigravity
+		fromConverter = generateContentResponseFromAntigravity
 	} else {
 		toConverter = generateContentParametersToMldev
 		fromConverter = generateContentResponseFromMldev
@@ -4127,6 +4134,12 @@ func (m Models) generateContentStream(ctx context.Context, model string, content
 	if m.apiClient.clientConfig.Backend == BackendVertexAI {
 		toConverter = generateContentParametersToVertex
 		fromConverter = generateContentResponseFromVertex
+	} else if m.apiClient.clientConfig.Backend == BackendGeminiCLI {
+		toConverter = generateContentParametersToGeminiCLI
+		fromConverter = generateContentResponseFromGeminiCLI
+	} else if m.apiClient.clientConfig.Backend == BackendAntigravity {
+		toConverter = generateContentParametersToAntigravity
+		fromConverter = generateContentResponseFromAntigravity
 	} else {
 		toConverter = generateContentParametersToMldev
 		fromConverter = generateContentResponseFromMldev
@@ -5328,3 +5341,81 @@ func (m Models) GenerateVideosFromSource(ctx context.Context, model string, sour
 	// Rely on backend validation for combinations of prompt, image, and video.
 	return m.generateVideos(ctx, model, nil, nil, nil, source, config)
 }
+
+func generateContentParametersToGeminiCLI(ac *apiClient, fromObject map[string]any, parentObject map[string]any) (map[string]any, error) {
+	mldevParams, err := generateContentParametersToMldev(ac, fromObject, parentObject)
+	if err != nil {
+		return nil, err
+	}
+
+	modelID := ""
+	if urlParams, ok := mldevParams["_url"].(map[string]any); ok {
+		modelID = urlParams["model"].(string)
+		modelID = strings.TrimPrefix(modelID, "models/")
+	}
+	delete(mldevParams, "_url")
+
+	toObject := map[string]any{
+		"model":   modelID,
+		"project": ac.clientConfig.Project,
+		"request": mldevParams,
+		"_url": map[string]any{
+			"model": "",
+		},
+	}
+
+	return toObject, nil
+}
+
+func generateContentResponseFromGeminiCLI(fromObject map[string]any, parentObject map[string]any) (map[string]any, error) {
+	if response, ok := fromObject["response"].(map[string]any); ok {
+		if sdkHTTPResponse, ok := fromObject["sdkHttpResponse"]; ok {
+			response["sdkHttpResponse"] = sdkHTTPResponse
+		}
+		return generateContentResponseFromMldev(response, parentObject)
+	}
+	return generateContentResponseFromMldev(fromObject, parentObject)
+}
+
+func generateContentParametersToAntigravity(ac *apiClient, fromObject map[string]any, parentObject map[string]any) (map[string]any, error) {
+	// Antigravity is similar to Gemini CLI but might have different wrapping or extra fields
+	mldevParams, err := generateContentParametersToMldev(ac, fromObject, parentObject)
+	if err != nil {
+		return nil, err
+	}
+
+	modelID := ""
+	if urlParams, ok := mldevParams["_url"].(map[string]any); ok {
+		modelID = urlParams["model"].(string)
+		modelID = strings.TrimPrefix(modelID, "models/")
+	}
+	delete(mldevParams, "_url")
+
+	// Antigravity requires a requestId and sessionId
+	// We can generate them here or leave them to be handled by the backend if it supports it.
+	// Looking at provider/antigravity/antigravity.go, it generates them.
+	
+	toObject := map[string]any{
+		"model":   modelID,
+		"project": ac.clientConfig.Project,
+		"request": mldevParams,
+		"userAgent": "antigravity",
+		"_url": map[string]any{
+			"model": "",
+		},
+	}
+
+	return toObject, nil
+}
+
+func generateContentResponseFromAntigravity(fromObject map[string]any, parentObject map[string]any) (map[string]any, error) {
+	// Similar to Gemini CLI response wrapping
+	if response, ok := fromObject["response"].(map[string]any); ok {
+		if sdkHTTPResponse, ok := fromObject["sdkHttpResponse"]; ok {
+			response["sdkHttpResponse"] = sdkHTTPResponse
+		}
+		return generateContentResponseFromMldev(response, parentObject)
+	}
+	return generateContentResponseFromMldev(fromObject, parentObject)
+}
+

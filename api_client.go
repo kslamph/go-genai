@@ -145,6 +145,17 @@ func (ac *apiClient) createAPIURL(suffix, method string, httpOptions *HTTPOption
 			path = fmt.Sprintf("projects/%s/locations/%s/%s", ac.clientConfig.Project, ac.clientConfig.Location, path)
 		}
 		finalURL = u.JoinPath(httpOptions.APIVersion, path)
+	} else if ac.clientConfig.Backend == BackendGeminiCLI || ac.clientConfig.Backend == BackendAntigravity {
+		// For Gemini CLI and Antigravity, we want v1internal:generateContent (no slash)
+		baseURLStr := httpOptions.BaseURL
+		if !strings.HasSuffix(baseURLStr, "/") {
+			baseURLStr += "/"
+		}
+		u, err = url.Parse(baseURLStr + httpOptions.APIVersion + path)
+		if err != nil {
+			return nil, fmt.Errorf("createAPIURL: error parsing backend URL: %w", err)
+		}
+		finalURL = u
 	} else {
 		if !strings.Contains(path, fmt.Sprintf("/%s/", httpOptions.APIVersion)) {
 			path = fmt.Sprintf("%s/%s", httpOptions.APIVersion, path)

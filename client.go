@@ -66,6 +66,10 @@ const (
 	BackendGeminiAPI
 	// BackendVertexAI is the Vertex AI backend.
 	BackendVertexAI
+	// BackendGeminiCLI is the Gemini CLI backend (Cloud Code Assist API).
+	BackendGeminiCLI
+	// BackendAntigravity is the Antigravity backend.
+	BackendAntigravity
 )
 
 // The Stringer interface for Backend.
@@ -75,6 +79,10 @@ func (t Backend) String() string {
 		return "BackendGeminiAPI"
 	case BackendVertexAI:
 		return "BackendVertexAI"
+	case BackendGeminiCLI:
+		return "BackendGeminiCLI"
+	case BackendAntigravity:
+		return "BackendAntigravity"
 	default:
 		return "BackendUnspecified"
 	}
@@ -213,6 +221,13 @@ func NewClient(ctx context.Context, cc *ClientConfig) (*Client, error) {
 			} else {
 				cc.Backend = BackendGeminiAPI
 			}
+		} else if v, ok := envVars["GOOGLE_GENAI_USE_ANTIGRAVITY"]; ok {
+			v = strings.ToLower(v)
+			if v == "1" || v == "true" {
+				cc.Backend = BackendAntigravity
+			} else {
+				cc.Backend = BackendGeminiAPI
+			}
 		} else {
 			cc.Backend = BackendGeminiAPI
 		}
@@ -240,7 +255,7 @@ func NewClient(ctx context.Context, cc *ClientConfig) (*Client, error) {
 		cc.Location = envLocation
 	}
 
-	if cc.Backend == BackendVertexAI {
+	if cc.Backend == BackendVertexAI || cc.Backend == BackendAntigravity {
 		// Handle when to use Vertex AI in express mode (api key).
 		// Explicit initializer arguments are already validated above.
 		if cc.Credentials != nil && envAPIKey != "" {
@@ -266,16 +281,16 @@ func NewClient(ctx context.Context, cc *ClientConfig) (*Client, error) {
 		}
 
 		if (cc.Project == "" || cc.Location == "") && cc.APIKey == "" {
-			return nil, fmt.Errorf("project/location or API key must be set when using Vertex AI backend. ClientConfig: %#v", cc)
+			return nil, fmt.Errorf("project/location or API key must be set when using Vertex AI or Antigravity backend. ClientConfig: %#v", cc)
 		}
-	} else {
+	} else if cc.Backend == BackendGeminiAPI {
 		// Mldev API
 		if cc.APIKey == "" {
 			return nil, fmt.Errorf("api key is required for Google AI backend. ClientConfig: %#v.\nYou can get the API key from https://ai.google.dev/gemini-api/docs/api-key", cc)
 		}
 	}
 
-	if cc.Backend == BackendVertexAI && cc.Credentials == nil && cc.APIKey == "" && cc.HTTPClient == nil {
+	if (cc.Backend == BackendVertexAI || cc.Backend == BackendGeminiCLI || cc.Backend == BackendAntigravity) && cc.Credentials == nil && cc.APIKey == "" && cc.HTTPClient == nil {
 		cred, err := credentials.DetectDefault(&credentials.DetectOptions{
 			Scopes: []string{"https://www.googleapis.com/auth/cloud-platform"},
 		})
@@ -289,25 +304,29 @@ func NewClient(ctx context.Context, cc *ClientConfig) (*Client, error) {
 	if baseURL != "" {
 		cc.HTTPOptions.BaseURL = baseURL
 	}
-	if cc.HTTPOptions.BaseURL == "" && cc.Backend == BackendVertexAI {
+	if cc.HTTPOptions.BaseURL == "" && (cc.Backend == BackendVertexAI || cc.Backend == BackendAntigravity) {
 		if cc.Location == "global" || cc.APIKey != "" {
 			cc.HTTPOptions.BaseURL = "https://aiplatform.googleapis.com/"
 		} else {
 			cc.HTTPOptions.BaseURL = fmt.Sprintf("https://%s-aiplatform.googleapis.com/", cc.Location)
 		}
+	} else if cc.HTTPOptions.BaseURL == "" && cc.Backend == BackendGeminiCLI {
+		cc.HTTPOptions.BaseURL = "https://cloudcode-pa.googleapis.com/"
 	} else if cc.HTTPOptions.BaseURL == "" {
 		cc.HTTPOptions.BaseURL = "https://generativelanguage.googleapis.com/"
 	}
 
 	if cc.HTTPOptions.APIVersion == "" && cc.Backend == BackendVertexAI {
 		cc.HTTPOptions.APIVersion = "v1beta1"
+	} else if cc.HTTPOptions.APIVersion == "" && (cc.Backend == BackendGeminiCLI || cc.Backend == BackendAntigravity) {
+		cc.HTTPOptions.APIVersion = "v1internal"
 	} else if cc.HTTPOptions.APIVersion == "" {
 		cc.HTTPOptions.APIVersion = "v1beta"
 	}
 
 	if cc.HTTPClient == nil {
 		// x-goog-api-key header is set for Express mode in api_client.go
-		if cc.Backend == BackendVertexAI && cc.APIKey == "" {
+		if (cc.Backend == BackendVertexAI || cc.Backend == BackendGeminiCLI || cc.Backend == BackendAntigravity) && cc.APIKey == "" {
 			quotaProjectID, err := cc.Credentials.QuotaProjectID(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("failed to get quota project ID: %w", err)
