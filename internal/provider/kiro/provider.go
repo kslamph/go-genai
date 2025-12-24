@@ -13,6 +13,7 @@ import (
 
 	"github.com/sashabaranov/go-openai"
 	"github.com/sunbankio/omniproxy/internal/provider"
+	"github.com/sunbankio/omniproxy/pkg/utils"
 )
 
 type Provider struct {
@@ -155,14 +156,17 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 
 		// Stream parsing logic
 		reader := bufio.NewReader(resp.Body)
+		messageCount := 0
 		for {
 			// Read total length (4 bytes)
 			lenBuf := make([]byte, 4)
 			_, err := io.ReadFull(reader, lenBuf)
 			if err != nil {
 				if err == io.EOF {
+					utils.L().Debugf("Kiro stream ended after %d messages", messageCount)
 					return
 				}
+				utils.L().Errorf("Kiro stream error reading length: %v", err)
 				errChan <- err
 				return
 			}
@@ -171,6 +175,7 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 			// Read header length (4 bytes)
 			_, err = io.ReadFull(reader, lenBuf)
 			if err != nil {
+				utils.L().Errorf("Kiro stream error reading header length: %v", err)
 				errChan <- err
 				return
 			}
@@ -187,6 +192,7 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 			payload := make([]byte, payloadLen)
 			_, err = io.ReadFull(reader, payload)
 			if err != nil {
+				utils.L().Errorf("Kiro stream error reading payload: %v", err)
 				errChan <- err
 				return
 			}
@@ -194,11 +200,17 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 			// Skip message CRC (4 bytes)
 			reader.Discard(4)
 
+			messageCount++
+			utils.L().Debugf("Kiro stream message #%d, payload length: %d", messageCount, len(payload))
+
 			// Parse payload
 			var event map[string]interface{}
 			if err := json.Unmarshal(payload, &event); err == nil {
-				// Extract contentDelta
-				if delta, ok := event["contentDelta"].(string); ok && delta != "" {
+				utils.L().Debugf("Kiro stream event: %+v", event)
+				
+				// Extract content from Kiro event stream
+				if content, ok := event["content"].(string); ok && content != "" {
+					utils.L().Debugf("Kiro stream sending content: %s", content)
 					respChan <- openai.ChatCompletionStreamResponse{
 						ID:      "chatcmpl-kiro-stream",
 						Object:  "chat.completion.chunk",
@@ -207,13 +219,16 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 						Choices: []openai.ChatCompletionStreamChoice{
 							{
 								Delta: openai.ChatCompletionStreamChoiceDelta{
-									Content: delta,
+									Content: content,
 								},
 							},
 						},
 					}
+				} else {
+					utils.L().Debugf("Kiro stream no content found in event")
 				}
-				// Handle invalidStateEvent or others?
+			} else {
+				utils.L().Errorf("Kiro stream failed to parse payload: %v, payload: %s", err, string(payload))
 			}
 		}
 	}()
