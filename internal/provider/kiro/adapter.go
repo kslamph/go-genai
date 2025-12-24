@@ -95,13 +95,14 @@ func ToKiroRequest(req openai.ChatCompletionRequest, profileArn *string) (*CodeW
 	var history []HistoryItem
 	for i := 0; i < len(req.Messages)-1; i++ {
 		msg := req.Messages[i]
-		if msg.Role == openai.ChatMessageRoleUser {
+		switch msg.Role {
+		case openai.ChatMessageRoleUser:
 			history = append(history, HistoryItem{
 				UserInputMessage: &UserInputMessage{
 					Content: msg.Content,
 				},
 			})
-		} else if msg.Role == openai.ChatMessageRoleAssistant {
+		case openai.ChatMessageRoleAssistant:
 			history = append(history, HistoryItem{
 				AssistantResponseMessage: &AssistantResponseMessage{
 					Content: msg.Content,
