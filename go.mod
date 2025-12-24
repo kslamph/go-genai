@@ -7,9 +7,11 @@ replace google.golang.org/genai => github.com/kslamph/go-genai v0.0.0-2025122400
 require (
 	cloud.google.com/go/auth v0.18.0
 	github.com/gofrs/flock v0.12.1
+	github.com/sashabaranov/go-openai v1.41.2
 	go.uber.org/zap v1.27.0
 	golang.org/x/oauth2 v0.30.0
 	google.golang.org/genai v1.40.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
