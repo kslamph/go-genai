@@ -49,6 +49,7 @@ type GeminiCredentials struct {
 	TokenType    string `json:"token_type"`
 	ExpiryDate   int64  `json:"expiry_date"`
 	Scope        string `json:"scope,omitempty"`
+	ProjectID    string `json:"project_id,omitempty"` // Antigravity project ID
 }
 
 // GeminiAuthenticator implements the Authenticator interface for Gemini
@@ -446,5 +447,50 @@ func (a *GeminiAuthenticator) exchangeCodeForTokens(ctx context.Context, code, r
 
 	a.logger.Debugw("Authentication successful, credentials saved",
 		"provider", "Gemini")
+	return nil
+}
+
+// GetProjectID returns the stored project ID for this credential
+func (a *GeminiAuthenticator) GetProjectID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Load credentials if not in memory
+	if a.credentials == nil {
+		creds, err := a.loadCredentials()
+		if err != nil {
+			return ""
+		}
+		a.credentials = creds
+	}
+
+	return a.credentials.ProjectID
+}
+
+// SetProjectID stores the project ID for this credential
+func (a *GeminiAuthenticator) SetProjectID(ctx context.Context, projectID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Load credentials if not in memory
+	if a.credentials == nil {
+		creds, err := a.loadCredentials()
+		if err != nil {
+			return fmt.Errorf("credentials not found: %w", err)
+		}
+		a.credentials = creds
+	}
+
+	// Update project ID
+	a.credentials.ProjectID = projectID
+
+	// Save credentials
+	if err := a.saveCredentials(a.credentials); err != nil {
+		return fmt.Errorf("failed to save credentials with project ID: %w", err)
+	}
+
+	a.logger.Infow("Project ID saved to credentials",
+		"provider", "Gemini",
+		"project_id", projectID)
 	return nil
 }

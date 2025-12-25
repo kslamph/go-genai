@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	cloudauth "cloud.google.com/go/auth"
@@ -80,10 +81,49 @@ func (p *GeminiProvider) ChatCompletion(ctx context.Context, req openai.ChatComp
 	// We assume "gemini-2.5-flash" or similar model is passed in req.Model
 	resp, err := p.client.Models.GenerateContent(ctx, req.Model, contents, config)
 	if err != nil {
-		return nil, err
+		return nil, p.wrapError(err)
 	}
 
 	return FromGeminiResponse(resp, req.Model), nil
+}
+
+// wrapError converts genai errors to ProviderError with proper status codes
+func (p *GeminiProvider) wrapError(err error) error {
+	errStr := err.Error()
+	
+	// Parse genai error format: "Error 429, Message: ..., Status: RESOURCE_EXHAUSTED, Details: [...]"
+	statusCode := http.StatusInternalServerError
+	message := errStr
+	var details interface{}
+	
+	// Extract status code
+	if idx := strings.Index(errStr, "Error "); idx >= 0 {
+		var code int
+		if _, scanErr := fmt.Sscanf(errStr[idx:], "Error %d", &code); scanErr == nil {
+			statusCode = code
+		}
+	}
+	
+	// Extract message
+	if idx := strings.Index(errStr, "Message: "); idx >= 0 {
+		endIdx := strings.Index(errStr[idx:], ", Status:")
+		if endIdx > 0 {
+			message = errStr[idx+9 : idx+endIdx]
+		}
+	}
+	
+	// Extract status and de for additional context
+	if idx := strings.Index(errStr, "Status: "); idx >= 0 {
+		detailsIdx := strings.Index(errStr[idx:], "Details:")
+		if detailsIdx > 0 {
+			details = map[string]string{
+				"status":  errStr[idx+8 : idx+detailsIdx-2],
+				"details": errStr[idx+detailsIdx:],
+			}
+		}
+	}
+	
+	return provider.NewProviderError(statusCode, message, p.name, details)
 }
 
 func (p *GeminiProvider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error) {
@@ -92,7 +132,7 @@ func (p *GeminiProvider) StreamChatCompletion(ctx context.Context, req openai.Ch
 
 	sys, contents, config, err := ToGeminiRequest(req)
 	if err != nil {
-		errChan <- err
+		errChan <- p.wrapError(err)
 		close(respChan)
 		close(errChan)
 		return respChan, errChan
@@ -109,7 +149,7 @@ func (p *GeminiProvider) StreamChatCompletion(ctx context.Context, req openai.Ch
 		iter := p.client.Models.GenerateContentStream(ctx, req.Model, contents, config)
 		for resp, err := range iter {
 			if err != nil {
-				errChan <- err
+				errChan <- p.wrapError(err)
 				return
 			}
 
