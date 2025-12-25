@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -108,9 +110,66 @@ func (s *Server) writeModelsResponse(w http.ResponseWriter, modelNames []string)
 }
 
 func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
+	// Read the raw body for logging
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+
+	// Log the raw request body
+	utils.L().Infow("Raw HTTP request body", "body", string(bodyBytes))
+
+	// Restore the body for decoding
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
 	var req openai.ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		utils.L().Errorf("Failed to decode request: %v", err)
 		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Log the decoded request
+	utils.L().Infow("Decoded request", "num_messages", len(req.Messages), "model", req.Model)
+	for i, msg := range req.Messages {
+		// Extract text from either Content (string) or MultiContent (array)
+		contentText := msg.Content
+		if contentText == "" && len(msg.MultiContent) > 0 {
+			// Concatenate all text parts from MultiContent
+			for _, part := range msg.MultiContent {
+				if part.Type == "text" {
+					contentText += part.Text
+				}
+			}
+		}
+		utils.L().Infow("Message details", "index", i, "role", msg.Role, "content_length", len(contentText), "has_multicontent", len(msg.MultiContent) > 0, "cew", truncate(contentText, 100))
+	}
+
+	// Validate that there's at least one non-empty user message
+	hasUserMessage := false
+	for _, msg := range req.Messages {
+		if msg.Role == openai.ChatMessageRoleUser {
+			// Check both Content and MultiContent
+			if msg.Content != "" {
+				hasUserMessage = true
+				break
+			}
+			// Check MultiContent for text
+			for _, part := range msg.MultiContent {
+				if part.Type == "text" && part.Text != "" {
+					hasUserMessage = true
+					break
+				}
+			}
+			if hasUserMessage {
+				break
+			}
+		}
+	}
+	if !hasUserMessage {
+		utils.L().Errorf("Request has no user message content")
+		http.Error(w, "request must contain at least one non-empty user message", http.StatusBadRequest)
 		return
 	}
 
@@ -125,6 +184,13 @@ func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
 	utils.L().Infof("Model '%s' -> Provider: %s (type: %s) - Reason: %s", req.Model, p.Name(), p.Type(), selectionReason)
 
 	s.executeChat(w, r, p, req)
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 func (s *Server) HandleProviderChat(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +226,7 @@ func (s *Server) normalChat(w http.ResponseWriter, r *http.Request, p provider.P
 	resp, err := p.ChatCompletion(r.Context(), req)
 	if err != nil {
 		utils.L().Errorf("Provider %s failed: %v", p.Name(), err)
+		s.pm.RecordFailure(p) // Record failure for load balancing
 		s.writeErrorResponse(w, err)
 		return
 	}
@@ -223,6 +290,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p provider.P
 		case err := <-errChan:
 			if err != nil {
 				utils.L().Errorf("Stream error from provider %s: %v", p.Name(), err)
+				s.pm.RecordFailure(p) // Record failure for load balancing
 				// SSE error handling is tricky, often just closing is best if started
 			}
 			return

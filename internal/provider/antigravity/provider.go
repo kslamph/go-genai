@@ -129,12 +129,29 @@ func NewProviderWithGeminiAuth(ctx context.Context, name string, geminiAuth *aut
 		"provider", name,
 		"project_id", projectID)
 
-	return &AntigravityProvider{
+	// Log available models for this provider
+	provider := &AntigravityProvider{
 		client:     client,
 		name:       name,
-		auth:       nil, // We don't have antigravity.Authenticator in this case
+		auth:       nil,
 		geminiAuth: geminiAuth,
-	}, nil
+	}
+
+	// Fetch and log available models
+	models, err := provider.ListModels(ctx)
+	if err == nil {
+		utils.L().Infow("Available models for provider",
+			"provider", name,
+			"project_id", projectID,
+			"models", models)
+	} else {
+		utils.L().Warnw("Failed to fetch models for provider",
+			"provider", name,
+			"project_id", projectID,
+			"error", err)
+	}
+
+	return provider, nil
 }
 
 func (p *AntigravityProvider) Type() string {
@@ -158,22 +175,43 @@ func (p *AntigravityProvider) ChatCompletion(ctx context.Context, req openai.Cha
 		config.SystemInstruction = sys
 	}
 
-	utils.L().Debugw("Calling GenerateContent",
+	utils.L().Infow("Calling GenerateContent",
 		"provider", p.name,
 		"model", req.Model,
 		"num_contents", len(contents),
-		"has_system", sys != nil)
+		"has_system", sys != nil,
+		"project_id", p.getProjectID(),
+		"base_url", AntigravityBaseURL,
+		"temperature", config.Temperature,
+		"max_tokens", config.MaxOutputTokens)
+
+	// Debug: Print full request details
+	utils.L().Infow("Full request details",
+		"provider", p.name,
+		"original_model", req.Model,
+		"num_messages", len(req.Messages),
+		"stream", req.Stream)
 
 	resp, err := p.client.Models.GenerateContent(ctx, req.Model, contents, config)
 	if err != nil {
 		utils.L().Errorw("GenerateContent failed",
 			"provider", p.name,
 			"model", req.Model,
-			"error", err)
+			"project_id", p.getProjectID(),
+			"error", err,
+			"error_type", fmt.Sprintf("%T", err))
 		return nil, p.wrapError(err)
 	}
 
 	return gemini.FromGeminiResponse(resp, req.Model), nil
+}
+
+// getProjectID returns the project ID for this provider (for debugging)
+func (p *AntigravityProvider) getProjectID() string {
+	if p.geminiAuth != nil {
+		return p.geminiAuth.GetProjectID()
+	}
+	return "unknown"
 }
 
 func (p *AntigravityProvider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error) {
@@ -346,8 +384,21 @@ type geminiTokenProvider struct {
 func (p *geminiTokenProvider) Token(ctx context.Context) (*cloudauth.Token, error) {
 	token, err := p.authenticator.GetToken(ctx)
 	if err != nil {
+		utils.L().Errorw("Failed to get token from authenticator",
+			"creds_path", p.authenticator.GetCredentialsPath(),
+			"error", err)
 		return nil, err
 	}
+
+	// Log token info (first 20 chars only for security)
+	tokenPreview := token
+	if len(token) > 20 {
+		tokenPreview = token[:20] + "..."
+	}
+	utils.L().Debugw("Token retrieved",
+		"creds_path", p.authenticator.GetCredentialsPath(),
+		"token_preview", tokenPreview)
+
 	return &cloudauth.Token{
 		Value:  token,
 		Expiry: time.Now().Add(time.Hour),

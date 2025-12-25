@@ -164,7 +164,7 @@ func testAntigravity(ctx context.Context) {
 		log.Fatalf("Failed to create genai client for Antigravity: %v", err)
 	}
 
-	model := "claude-opus-4-5-thinking"
+	model := "claude-sonnet-4-5"
 	runTests(ctx, client, model)
 }
 
