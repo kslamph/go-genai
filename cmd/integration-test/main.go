@@ -25,8 +25,8 @@ type TestCase struct {
 var allTestCases = []TestCase{
 	{"qwen", "qwen3-coder-plus", "/qwen/v1/chat/completions"},
 	{"kiro", "claude-haiku-4-5", "/kiro/v1/chat/completions"},
-	{"gemini", "gemini-2.5-flash", "/gemini/v1/chat/completions"},
-	{"antigravity", "gemini-2.5-flash", "/antigravity/v1/chat/completions"},
+	{"gemini", "gemini-3-flash-preview", "/gemini/v1/chat/completions"},
+	{"antigravity", "gemini-3-flash", "/antigravity/v1/chat/completions"},
 	{"iflow", "kimi-k2", "/iflow/v1/chat/completions"},
 }
 

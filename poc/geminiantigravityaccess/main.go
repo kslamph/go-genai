@@ -83,8 +83,8 @@ func discoverProjectID(ctx context.Context, authenticator *auth.GeminiAuthentica
 func main() {
 	ctx := context.Background()
 
-	fmt.Println("=== Testing BackendGeminiCLI ===")
-	testGeminiCLI(ctx)
+	// fmt.Println("=== Testing BackendGeminiCLI ===")
+	// testGeminiCLI(ctx)
 
 	fmt.Println("\n=== Testing BackendAntigravity ===")
 	testAntigravity(ctx)
@@ -128,8 +128,8 @@ func testAntigravity(ctx context.Context) {
 		ClientSecret: "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",
 		Scope:        "https://www.googleapis.com/auth/cloud-platform",
 		RedirectPort: 8086,
-		CredsDir:     ".antigravity",
-		CredsFile:    "oauth_creds.json",
+		CredsDir:     "agent/AIClient-2-API/configs/antigravity",
+		CredsFile:    "1766389593140_oauth_creds.json",
 	})
 
 	if !antigravityAuth.IsAuthenticated() {
@@ -164,14 +164,14 @@ func testAntigravity(ctx context.Context) {
 		log.Fatalf("Failed to create genai client for Antigravity: %v", err)
 	}
 
-	model := "gemini-2.5-flash"
+	model := "claude-opus-4-5-thinking"
 	runTests(ctx, client, model)
 }
 
 func runTests(ctx context.Context, client *genai.Client, model string) {
 	fmt.Printf("Calling GenerateContent with model %s...\n", model)
 
-	result, err := client.Models.GenerateContent(ctx, model, genai.Text("Explain quantum entanglement in one sentence."), nil)
+	result, err := client.Models.GenerateContent(ctx, model, genai.Text("describe what model are you"), nil)
 	if err != nil {
 		log.Printf("GenerateContent failed: %v", err)
 		return
