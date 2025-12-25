@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/sunbankio/omniproxy/auth"
 	"github.com/sunbankio/omniproxy/internal/config"
 	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/internal/provider/antigravity"
@@ -26,19 +29,27 @@ type PoolManager struct {
 	// lastSuccess maps model name to the last successful provider instance
 	lastSuccess map[string]provider.Provider
 
-	// mu protects lastSuccess
+	// failureCount tracks recent failures per provider (for smart selection)
+	failureCount map[string]int
+
+	// lastUsedIndex tracks the last used index for round-robin per provider type
+	lastUsedIndex map[string]int
+
+	// mu protects lastSuccess, failureCount, and lastUsedIndex
 	mu sync.RWMutex
 
-	// rng for random selection
+	// rng for random selection (fallback only)
 	rng *rand.Rand
 }
 
 // NewPoolManager creates a new PoolManager and initializes providers
 func NewPoolManager(ctx context.Context, cfg *config.Config) (*PoolManager, error) {
 	pm := &PoolManager{
-		pools:       make(map[string][]provider.Provider),
-		lastSuccess: make(map[string]provider.Provider),
-		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
+		pools:         make(map[string][]provider.Provider),
+		lastSuccess:   make(map[string]provider.Provider),
+		failureCount:  make(map[string]int),
+		lastUsedIndex: make(map[string]int),
+		rng:           rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	if err := pm.initProviders(ctx, cfg); err != nil {
@@ -74,14 +85,47 @@ func (pm *PoolManager) initProviders(ctx context.Context, cfg *config.Config) er
 	antigravityPaths := append([]string{antigravity.DefaultOAuthConfig().CredsPath}, cfg.Credentials["antigravity"]...)
 	for i, path := range antigravityPaths {
 		if _, err := os.Stat(path); err == nil {
-			auth := antigravity.NewAuthenticator(&antigravity.OAuthConfig{
+			// Parse path into CredsDir and CredsFile for auth.GeminiAuthenticator (like POC)
+			credsDir := ".antigravity"
+			credsFile := "oauth_creds.json"
+			
+			// If it's the default path, use standard values
+			if path != antigravity.DefaultOAuthConfig().CredsPath {
+				// For additional paths, extract directory and filename
+				absPath := path
+				if !filepath.IsAbs(path) {
+					if wd, err := os.Getwd(); err == nil {
+						absPath = filepath.Join(wd, path)
+					}
+				}
+				credsDir = filepath.Dir(absPath)
+				credsFile = filepath.Base(absPath)
+				
+				// Make relative to home if possible (like the POC)
+				if homeDir, err := os.UserHomeDir(); err == nil {
+					if strings.HasPrefix(absPath, homeDir+string(filepath.Separator)) {
+						relPath := strings.TrimPrefix(absPath, homeDir+string(filepath.Separator))
+						credsDir = filepath.Dir(relPath)
+						credsFile = filepath.Base(relPath)
+					}
+				}
+			}
+			
+			// Use auth.GeminiAuthenticator like the POC
+			geminiAuth := auth.NewGeminiAuthenticator(&auth.GeminiOAuthConfig{
 				ClientID:     antigravity.DefaultOAuthConfig().ClientID,
 				ClientSecret: antigravity.DefaultOAuthConfig().ClientSecret,
 				Scope:        antigravity.DefaultOAuthConfig().Scope,
 				RedirectPort: antigravity.DefaultOAuthConfig().RedirectPort + i,
-				CredsPath:    path,
+				CredsDir:     credsDir,
+				CredsFile:    credsFile,
 			})
-			p, err := antigravity.NewProvider(ctx, fmt.Sprintf("antigravity-%d", i), auth)
+
+			utils.L().Infof("Creating Antigravity provider %d with credsDir=%s, credsFile=%s, fullPath=%s",
+				i, credsDir, credsFile, geminiAuth.GetCredentialsPath())
+
+			// Create antigravity provider with gemini auth
+			p, err := antigravity.NewProviderWithGeminiAuth(ctx, fmt.Sprintf("antigravity-%d", i), geminiAuth)
 			if err == nil {
 				pm.pools["antigravity"] = append(pm.pools["antigravity"], p)
 				utils.L().Infof("Loaded Antigravity provider: %s from %s", p.Name(), path)
@@ -149,33 +193,97 @@ func (pm *PoolManager) initProviders(ctx context.Context, cfg *config.Config) er
 
 // GetProvider returns a provider for the given type and model
 func (pm *PoolManager) GetProvider(providerType string, model string) (provider.Provider, error) {
+	p, _, err := pm.GetProviderWithReason(providerType, model)
+	return p, err
+}
+
+// GetProviderWithReason returns a provider for the given type and model with selection reason
+func (pm *PoolManager) GetProviderWithReason(providerType string, model string) (provider.Provider, string, error) {
 	pm.mu.RLock()
 	last := pm.lastSuccess[model]
 	pm.mu.RUnlock()
 
 	// If last successful provider for this model matches the type, use it
 	if last != nil && last.Type() == providerType {
-		return last, nil
+		return last, "last success", nil
 	}
 
-	// Otherwise, select a random one from the pool
+	// Otherwise, select using smart round-robin with failure tracking
 	pool := pm.pools[providerType]
 	if len(pool) == 0 {
-		return nil, fmt.Errorf("no providers available for type: %s", providerType)
+		return nil, "", fmt.Errorf("no providers available for type: %s", providerType)
 	}
 
-	return pool[pm.rng.Intn(len(pool))], nil
+	selected := pm.selectProviderWithFailureTracking(pool, providerType)
+	return selected, "round-robin", nil
+}
+
+// selectProviderWithFailureTracking selects a provider using round-robin while preferring providers with fewer failures
+func (pm *PoolManager) selectProviderWithFailureTracking(pool []provider.Provider, poolKey string) provider.Provider {
+	if len(pool) == 1 {
+		return pool[0]
+	}
+
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	// Find the provider with the minimum failure count
+	minFailures := -1
+	var candidates []int // indices of providers with minimum failures
+
+	for i, p := range pool {
+		failures := pm.failureCount[p.Name()]
+		if minFailures == -1 || failures < minFailures {
+			minFailures = failures
+			candidates = []int{i}
+		} else if failures == minFailures {
+			candidates = append(candidates, i)
+		}
+	}
+
+	// If multiple candidates with same failure count, use round-robin among them
+	var selectedIdx int
+	if len(candidates) == 1 {
+		selectedIdx = candidates[0]
+	} else {
+		// Round-robin through candidates
+		lastIdx := pm.lastUsedIndex[poolKey]
+
+		// Find the next candidate after lastIdx
+		found := false
+		for _, idx := range candidates {
+			if idx > lastIdx {
+				selectedIdx = idx
+				found = true
+				break
+			}
+		}
+
+		// If not found, wrap around to the first candidate
+		if !found {
+			selectedIdx = candidates[0]
+		}
+	}
+
+	pm.lastUsedIndex[poolKey] = selectedIdx
+	return pool[selectedIdx]
 }
 
 // GetProviderByModel finds a provider by model name across all pools
 func (pm *PoolManager) GetProviderByModel(model string) (provider.Provider, error) {
+	p, _, err := pm.GetProviderByModelWithReason(model)
+	return p, err
+}
+
+// GetProviderByModelWithReason finds a provider by model name across all pools and returns the selection reason
+func (pm *PoolManager) GetProviderByModelWithReason(model string) (provider.Provider, string, error) {
 	pm.mu.RLock()
 	last := pm.lastSuccess[model]
 	pm.mu.RUnlock()
 
 	// Check if last successful provider still supports this model
 	if last != nil && last.SupportsModel(model) {
-		return last, nil
+		return last, "last success", nil
 	}
 
 	// Find all providers that support this model
@@ -189,10 +297,12 @@ func (pm *PoolManager) GetProviderByModel(model string) (provider.Provider, erro
 	}
 
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no providers found for model: %s", model)
+		return nil, "", fmt.Errorf("no providers found for model: %s", model)
 	}
 
-	return candidates[pm.rng.Intn(len(candidates))], nil
+	// Use smart selection with failure tracking
+	selected := pm.selectProviderWithFailureTracking(candidates, "model:"+model)
+	return selected, "round-robin", nil
 }
 
 // RecordSuccess records a successful request for a model
@@ -200,6 +310,15 @@ func (pm *PoolManager) RecordSuccess(model string, p provider.Provider) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.lastSuccess[model] = p
+	// Reset failure count on success
+	pm.failureCount[p.Name()] = 0
+}
+
+// RecordFailure records a failed request for a provider
+func (pm *PoolManager) RecordFailure(p provider.Provider) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.failureCount[p.Name()]++
 }
 
 // ListModels returns a list of all models from all providers

@@ -2,9 +2,35 @@ package provider
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/sashabaranov/go-openai"
 )
+
+// ProviderError represents an error from a provider with HTTP status code information
+type ProviderError struct {
+	StatusCode int         // HTTP status code (e.g., 429, 404, 500)
+	Message    string      // Error message
+	Details    interface{} // Additional error details (optional)
+	Provider   string      // Provider name that generated the error
+}
+
+func (e *ProviderError) Error() string {
+	if e.Details != nil {
+		return fmt.Sprintf("[%s] %s (status: %d, details: %v)", e.Provider, e.Message, e.StatusCode, e.Details)
+	}
+	return fmt.Sprintf("[%s] %s (status: %d)", e.Provider, e.Message, e.StatusCode)
+}
+
+// NewProviderError creates a new ProviderError
+func NewProviderError(statusCode int, message string, provider string, details interface{}) *ProviderError {
+	return &ProviderError{
+		StatusCode: statusCode,
+		Message:    message,
+		Details:    details,
+		Provider:   provider,
+	}
+}
 
 // Provider represents a generic LLM provider
 type Provider interface {

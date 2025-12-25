@@ -43,7 +43,7 @@ func (p *Provider) Name() string {
 func (p *Provider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
 	resp, err := p.client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, p.wrapError(err)
 	}
 	return &resp, nil
 }
@@ -58,7 +58,7 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 
 		stream, err := p.client.CreateChatCompletionStream(ctx, req)
 		if err != nil {
-			errChan <- err
+			errChan <- p.wrapError(err)
 			return
 		}
 		defer stream.Close()
@@ -87,11 +87,30 @@ func (p *Provider) SupportsModel(model string) bool {
 	if err != nil {
 		return false
 	}
-	
+
 	for _, supported := range supportedModels {
 		if supported == model {
 			return true
 		}
 	}
 	return false
+}
+
+// wrapError converts go-openai errors to ProviderError with proper status codes
+func (p *Provider) wrapError(err error) error {
+	// Check if it's an APIError from go-openai
+	if apiErr, ok := err.(*openai.APIError); ok {
+		return provider.NewProviderError(apiErr.HTTPStatusCode, apiErr.Message, p.name, map[string]interface{}{
+			"type": apiErr.Type,
+			"code": apiErr.Code,
+		})
+	}
+
+	// Check if it's a RequestError
+	if reqErr, ok := err.(*openai.RequestError); ok {
+		return provider.NewProviderError(reqErr.HTTPStatusCode, reqErr.Err.Error(), p.name, nil)
+	}
+
+	// Fallback to generic 500 error
+	return provider.NewProviderError(http.StatusInternalServerError, err.Error(), p.name, nil)
 }

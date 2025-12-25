@@ -74,7 +74,7 @@ func (p *Provider) ChatCompletion(ctx context.Context, req openai.ChatCompletion
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+		return nil, provider.NewProviderError(resp.StatusCode, string(body), p.name, nil)
 	}
 
 	data, err := io.ReadAll(resp.Body)

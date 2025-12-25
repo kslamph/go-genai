@@ -160,7 +160,7 @@ func (s *Server) normalChat(w http.ResponseWriter, r *http.Request, p provider.P
 	resp, err := p.ChatCompletion(r.Context(), req)
 	if err != nil {
 		utils.L().Errorf("Provider %s failed: %v", p.Name(), err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeErrorResponse(w, err)
 		return
 	}
 
@@ -170,6 +170,36 @@ func (s *Server) normalChat(w http.ResponseWriter, r *http.Request, p provider.P
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		utils.L().Errorf("Failed to encode response: %v", err)
 	}
+}
+
+// writeErrorResponse writes an error response with proper status code
+func (s *Server) writeErrorResponse(w http.ResponseWriter, err error) {
+	// Check if it's a ProviderError with status code
+	if provErr, ok := err.(*provider.ProviderError); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(provErr.StatusCode)
+		
+		// Format error response similar to OpenAI API
+		errorResp := map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": provErr.Message,
+				"type":    "provider_error",
+				"code":    provErr.StatusCode,
+			},
+		}
+		
+		if provErr.Details != nil {
+			errorResp["error"].(map[string]interface{})["details"] = provErr.Details
+		}
+		
+		if err := json.NewEncoder(w).Encode(errorResp); err != nil {
+			utils.L().Errorf("Failed to encode error response: %v", err)
+		}
+		return
+	}
+	
+	// Fallback to generic 500 e for non-ProviderError
+	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
 func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p provider.Provider, req openai.ChatCompletionRequest) {
