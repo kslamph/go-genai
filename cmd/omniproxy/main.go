@@ -20,10 +20,21 @@ func main() {
 	configPath := flag.String("config", "omniproxy.yaml", "Path to the configuration file")
 	port := flag.Int("port", 8143, "Port to listen on")
 	logLevel := flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+	debug := flag.Bool("debug", false, "Enable debug mode (writes debug logs to server.log)")
 	flag.Parse()
 
+	// Check if DEBUG environment variable is set
+	debugEnv := os.Getenv("DEBUG")
+	enableDebug := *debug || debugEnv == "true" || debugEnv == "1"
+
+	// If debug is enabled, force log level to debug
+	if enableDebug {
+		*logLevel = "debug"
+	}
+
 	// 1. Initialize Logger
-	utils.InitLogger(*logLevel)
+	utils.InitLogger(*logLevel, enableDebug)
+	defer utils.CloseLogger()
 	utils.L().Info("Starting OmniProxy...")
 
 	// 2. Load Config

@@ -26,10 +26,10 @@ const (
 )
 
 type AntigravityProvider struct {
-	client       *genai.Client
-	name         string
-	auth         *Authenticator
-	geminiAuth   *auth.GeminiAuthenticator
+	client     *genai.Client
+	name       string
+	auth       *Authenticator
+	geminiAuth *auth.GeminiAuthenticator
 }
 
 // Ensure AntigravityProvider implements provider.Provider
@@ -186,7 +186,7 @@ func (p *AntigravityProvider) ChatCompletion(ctx context.Context, req openai.Cha
 		"max_tokens", config.MaxOutputTokens)
 
 	// Debug: Print full request details
-	utils.L().Infow("Full request details",
+	utils.L().Debugw("Full request details",
 		"provider", p.name,
 		"original_model", req.Model,
 		"num_messages", len(req.Messages),
@@ -252,12 +252,12 @@ func (p *AntigravityProvider) StreamChatCompletion(ctx context.Context, req open
 // wrapError converts genai errors to ProviderError with proper status codes
 func (p *AntigravityProvider) wrapError(err error) error {
 	errStr := err.Error()
-	
+
 	// Parse genai error format: "Error 429, Message: ..., Status: RESOURCE_EXHAUSTED, Details: [...]"
 	statusCode := http.StatusInternalServerError
 	message := errStr
 	var details interface{}
-	
+
 	// Extract status code
 	if idx := strings.Index(errStr, "Error "); idx >= 0 {
 		var code int
@@ -265,7 +265,7 @@ func (p *AntigravityProvider) wrapError(err error) error {
 			statusCode = code
 		}
 	}
-	
+
 	// Extract message
 	if idx := strings.Index(errStr, "Message: "); idx >= 0 {
 		endIdx := strings.Index(errStr[idx:], ", Status:")
@@ -273,7 +273,7 @@ func (p *AntigravityProvider) wrapError(err error) error {
 			message = errStr[idx+9 : idx+endIdx]
 		}
 	}
-	
+
 	// Extract status and details for additional context
 	if idx := strings.Index(errStr, "Status: "); idx >= 0 {
 		detailsIdx := strings.Index(errStr[idx:], "Details:")
@@ -284,7 +284,7 @@ func (p *AntigravityProvider) wrapError(err error) error {
 			}
 		}
 	}
-	
+
 	return provider.NewProviderError(statusCode, message, p.name, details)
 }
 
@@ -302,7 +302,7 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 
 	var token string
 	var err error
-	
+
 	if p.auth != nil {
 		token, err = p.auth.GetToken(ctx)
 	} else if p.geminiAuth != nil {
@@ -311,7 +311,7 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 		utils.L().Warnf("No authenticator available for Antigravity models")
 		return fallbackModels, nil
 	}
-	
+
 	if err != nil {
 		utils.L().Warnf("Failed to get token for Antigravity models: %v", err)
 		return fallbackModels, nil
@@ -409,7 +409,7 @@ func (p *geminiTokenProvider) Token(ctx context.Context) (*cloudauth.Token, erro
 func discoverProjectIDWithGeminiAuth(ctx context.Context, authenticator *auth.GeminiAuthenticator, baseURL string) (string, error) {
 	// Force refresh at the beginning (like POC)
 	authenticator.ForceRefresh(ctx)
-	
+
 	for attempt := 0; attempt < 2; attempt++ {
 		token, err := authenticator.GetToken(ctx)
 		if err != nil {

@@ -117,8 +117,8 @@ func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log the raw request body
-	utils.L().Infow("Raw HTTP request body", "body", string(bodyBytes))
+	// Log the raw request body (debug only)
+	utils.L().Debugw("Raw HTTP request body", "body", string(bodyBytes))
 
 	// Restore the body for decoding
 	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
@@ -130,8 +130,8 @@ func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log the decoded request
-	utils.L().Infow("Decoded request", "num_messages", len(req.Messages), "model", req.Model)
+	// Log the decoded request (debug only)
+	utils.L().Debugw("Decoded request", "num_messages", len(req.Messages), "model", req.Model)
 	for i, msg := range req.Messages {
 		// Extract text from either Content (string) or MultiContent (array)
 		contentText := msg.Content
@@ -143,7 +143,7 @@ func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		utils.L().Infow("Message details", "index", i, "role", msg.Role, "content_length", len(contentText), "has_multicontent", len(msg.MultiContent) > 0, "cew", truncate(contentText, 100))
+		utils.L().Debugw("Message details", "index", i, "role", msg.Role, "content_length", len(contentText), "has_multicontent", len(msg.MultiContent) > 0, "cew", truncate(contentText, 100))
 	}
 
 	// Validate that there's at least one non-empty user message
@@ -245,7 +245,7 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, err error) {
 	if provErr, ok := err.(*provider.ProviderError); ok {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(provErr.StatusCode)
-		
+
 		// Format error response similar to OpenAI API
 		errorResp := map[string]interface{}{
 			"error": map[string]interface{}{
@@ -254,17 +254,17 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, err error) {
 				"code":    provErr.StatusCode,
 			},
 		}
-		
+
 		if provErr.Details != nil {
 			errorResp["error"].(map[string]interface{})["details"] = provErr.Details
 		}
-		
+
 		if err := json.NewEncoder(w).Encode(errorResp); err != nil {
 			utils.L().Errorf("Failed to encode error response: %v", err)
 		}
 		return
 	}
-	
+
 	// Fallback to generic 500 e for non-ProviderError
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
