@@ -188,6 +188,20 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 
 	return fallbackModels, nil
 }
+
+func (p *AntigravityProvider) SupportsModel(model string) bool {
+	supportedModels, err := p.ListModels(context.Background())
+	if err != nil {
+		return false
+	}
+	
+	for _, supported := range supportedModels {
+		if supported == model {
+			return true
+		}
+	}
+	return false
+}
 // discoverProjectID helps find the project ID needed for API
 func discoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {

@@ -23,4 +23,7 @@ type Provider interface {
 
 	// ListModels returns a list of models supported by the provider
 	ListModels(ctx context.Context) ([]string, error)
+
+	// SupportsModel checks if the provider supports the given model
+	SupportsModel(model string) bool
 }

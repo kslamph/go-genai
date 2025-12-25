@@ -150,6 +150,20 @@ func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 	}, nil
 }
 
+func (p *Provider) SupportsModel(model string) bool {
+	supportedModels, err := p.ListModels(context.Background())
+	if err != nil {
+		return false
+	}
+	
+	for _, supported := range supportedModels {
+		if supported == model {
+			return true
+		}
+	}
+	return false
+}
+
 // StreamChatCompletion helper functions
 
 func (p *Provider) createStreamRequest(ctx context.Context, req openai.ChatCompletionRequest) (*http.Request, error) {
@@ -205,8 +219,13 @@ func (p *Provider) processEventStream(body io.Reader, model string, respChan cha
 		messageCount++
 		utils.L().Debugf("Kiro stream message #%d, payload length: %d", messageCount, len(payload))
 
-		if err := p.handleStreamPayload(payload, model, respChan); err != nil {
+		complete, err := p.handleStreamPayload(payload, model, respChan)
+		if err != nil {
 			utils.L().Errorf("Kiro stream error handling payload: %v", err)
+		}
+		if complete {
+			utils.L().Debugf("Kiro stream completed after %d messages", messageCount)
+			return
 		}
 	}
 }
@@ -250,13 +269,36 @@ func (p *Provider) readEventStreamMessage(reader *bufio.Reader) ([]byte, error) 
 	return payload, nil
 }
 
-func (p *Provider) handleStreamPayload(payload []byte, model string, respChan chan<- openai.ChatCompletionStreamResponse) error {
+func (p *Provider) handleStreamPayload(payload []byte, model string, respChan chan<- openai.ChatCompletionStreamResponse) (bool, error) {
 	var event map[string]interface{}
 	if err := json.Unmarshal(payload, &event); err != nil {
-		return fmt.Errorf("failed to parse payload: %v, payload: %s", err, string(payload))
+		return false, fmt.Errorf("failed to parse payload: %v, payload: %s", err, string(payload))
 	}
 
 	utils.L().Debugf("Kiro stream event: %+v", event)
+
+	// Check if this is a completion signal
+	if p.isStreamComplete(event) {
+		utils.L().Debugf("Kiro stream completion detected")
+		// Send final chunk with finish_reason=stop
+		finalChunk := openai.ChatCompletionStreamResponse{
+			ID:      "chatcmpl-kiro-stream",
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   model,
+			Choices: []openai.ChatCompletionStreamChoice{
+				{
+					Index: 0,
+					Delta: openai.ChatCompletionStreamChoiceDelta{
+						Content: "",
+					},
+					FinishReason: openai.FinishReasonStop,
+				},
+			},
+		}
+		respChan <- finalChunk
+		return true, nil
+	}
 
 	content, hasContent := p.extractContentFromEvent(event)
 	if hasContent && content != "" {
@@ -266,14 +308,53 @@ func (p *Provider) handleStreamPayload(payload []byte, model string, respChan ch
 		utils.L().Debugf("Kiro stream no content found in event")
 	}
 
-	return nil
+	return false, nil
 }
 
 func (p *Provider) extractContentFromEvent(event map[string]interface{}) (string, bool) {
-	if content, ok := event["content"].(string); ok {
+	// Check for content in streaming events
+	if content, ok := event["content"].(string); ok && content != "" {
 		return content, true
 	}
+	
+	// Check for contentDelta (streaming delta updates)
+	if delta, ok := event["contentDelta"].(string); ok && delta != "" {
+		return delta, true
+	}
+	
+	// Check for content in assistantResponseMessage (final message)
+	if message, ok := event["assistantResponseMessage"].(map[string]interface{}); ok {
+		if content, ok := message["content"].(string); ok && content != "" {
+			return content, true
+		}
+	}
+	
 	return "", false
+}
+
+func (p *Provider) isStreamComplete(event map[string]interface{}) bool {
+	// Check if this is an assistantResponseMessage (which indicates completion in streaming)
+	if _, ok := event["assistantResponseMessage"].(map[string]interface{}); ok {
+		return true
+	}
+	
+	// Check if there's no contentDelta but there are other fields
+	if _, hasDelta := event["contentDelta"].(string); !hasDelta {
+		// If we have an assistantResponseMessage without contentDelta, it's likely the end
+		if _, ok := event["assistantResponseMessage"]; ok {
+			return true
+		}
+	}
+	
+	// Check for explicit completion signals
+	if stop, ok := event["stop"].(string); ok && stop == "true" {
+		return true
+	}
+	if stopReason, ok := event["stopReason"].(string); ok && stopReason != "" {
+		return true
+	}
+	
+	return false
 }
 
 func (p *Provider) createStreamResponse(content, model string) openai.ChatCompletionStreamResponse {

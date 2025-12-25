@@ -81,3 +81,17 @@ func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 		"qwen3-coder-flash",
 	}, nil
 }
+
+func (p *Provider) SupportsModel(model string) bool {
+	supportedModels, err := p.ListModels(context.Background())
+	if err != nil {
+		return false
+	}
+	
+	for _, supported := range supportedModels {
+		if supported == model {
+			return true
+		}
+	}
+	return false
+}

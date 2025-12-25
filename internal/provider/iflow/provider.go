@@ -87,7 +87,22 @@ func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 		"kimi-k2-0905",
 		"kimi-k2",
 		"glm-4.6",
+		"glm-4.7",
 		"deepseek-v3.2",
 		"deepseek-r1",
 	}, nil
+}
+
+func (p *Provider) SupportsModel(model string) bool {
+	supportedModels, err := p.ListModels(context.Background())
+	if err != nil {
+		return false
+	}
+
+	for _, supported := range supportedModels {
+		if supported == model {
+			return true
+		}
+	}
+	return false
 }

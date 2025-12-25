@@ -173,7 +173,8 @@ func (pm *PoolManager) GetProviderByModel(model string) (provider.Provider, erro
 	last := pm.lastSuccess[model]
 	pm.mu.RUnlock()
 
-	if last != nil {
+	// Check if last successful provider still supports this model
+	if last != nil && last.SupportsModel(model) {
 		return last, nil
 	}
 
@@ -181,10 +182,9 @@ func (pm *PoolManager) GetProviderByModel(model string) (provider.Provider, erro
 	var candidates []provider.Provider
 	for _, pool := range pm.pools {
 		for _, p := range pool {
-			// We need a way to check if a provider supports a model
-			// For now, we assume if they exist in the pool, we'll try them
-			// In a real scenario, we'd have a ModelSupported(model) method.
-			candidates = append(candidates, p)
+			if p.SupportsModel(model) {
+				candidates = append(candidates, p)
+			}
 		}
 	}
 

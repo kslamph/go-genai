@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	cloudauth "cloud.google.com/go/auth"
 	"github.com/sashabaranov/go-openai"
@@ -115,6 +116,24 @@ func (p *GeminiProvider) StreamChatCompletion(ctx context.Context, req openai.Ch
 			chunk := FromGeminiChunk(resp, req.Model)
 			respChan <- *chunk
 		}
+
+		// Send final chunk with finish_reason=stop to properly signal stream termination
+		finalChunk := openai.ChatCompletionStreamResponse{
+			ID:      "chatcmpl-gemini",
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   req.Model,
+			Choices: []openai.ChatCompletionStreamChoice{
+				{
+					Index: 0,
+					Delta: openai.ChatCompletionStreamChoiceDelta{
+						Content: "",
+					},
+					FinishReason: openai.FinishReasonStop,
+				},
+			},
+		}
+		respChan <- finalChunk
 	}()
 
 	return respChan, errChan
@@ -130,6 +149,20 @@ func (p *GeminiProvider) ListModels(ctx context.Context) ([]string, error) {
 		"gemini-3-pro-preview",
 		"gemini-3-flash-preview",
 	}, nil
+}
+
+func (p *GeminiProvider) SupportsModel(model string) bool {
+	supportedModels, err := p.ListModels(context.Background())
+	if err != nil {
+		return false
+	}
+	
+	for _, supported := range supportedModels {
+		if supported == model {
+			return true
+		}
+	}
+	return false
 }
 
 // discoverProjectID helps find the project ID needed for Gemini API
