@@ -11,8 +11,8 @@ import (
 	"time"
 
 	cloudauth "cloud.google.com/go/auth"
-	"github.com/sashabaranov/go-openai"
 	"github.com/sunbankio/omniproxy/auth"
+	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 	"google.golang.org/genai"
 )
@@ -31,8 +31,6 @@ type AntigravityProvider struct {
 }
 
 // NewProvider creates a new Antigravity provider with auth
-// Note: This provider is NOT available for OpenAI-compatible API requests.
-// It's kept for future native protocol implementation.
 func NewProvider(ctx context.Context, name string, auth *Authenticator) (*AntigravityProvider, error) {
 	// 1. Discover Project ID
 	projectID, err := discoverProjectID(ctx, auth, AntigravityBaseURL)
@@ -67,8 +65,6 @@ func NewProvider(ctx context.Context, name string, auth *Authenticator) (*Antigr
 }
 
 // NewProviderWithGeminiAuth creates a new Antigravity provider using auth.GeminiAuthenticator (like POC)
-// Note: This provider is NOT available for OpenAI-compatible API requests.
-// It's kept for future native protocol implementation.
 func NewProviderWithGeminiAuth(ctx context.Context, name string, geminiAuth *auth.GeminiAuthenticator) (*AntigravityProvider, error) {
 	// 1. Check if project ID is already stored in credentials
 	projectID := geminiAuth.GetProjectID()
@@ -162,22 +158,22 @@ func (p *AntigravityProvider) Name() string {
 	return p.name
 }
 
-// GetClient returns the underlying genai.Client for native protocol access
+func (p *AntigravityProvider) SupportedProtocols() []provider.Protocol {
+	return []provider.Protocol{provider.ProtocolGemini}
+}
+
 func (p *AntigravityProvider) GetClient() *genai.Client {
 	return p.client
 }
 
-// GetAuth returns the authenticator for native protocol access
 func (p *AntigravityProvider) GetAuth() *Authenticator {
 	return p.auth
 }
 
-// GetGeminiAuth returns the GeminiAuthenticator for native protocol access
 func (p *AntigravityProvider) GetGeminiAuth() *auth.GeminiAuthenticator {
 	return p.geminiAuth
 }
 
-// getProjectID returns the project ID for this provider (for debugging)
 func (p *AntigravityProvider) getProjectID() string {
 	if p.geminiAuth != nil {
 		return p.geminiAuth.GetProjectID()
@@ -185,7 +181,6 @@ func (p *AntigravityProvider) getProjectID() string {
 	return "unknown"
 }
 
-// ListModels returns a list of models supported by the provider
 func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) {
 	fallbackModels := []string{
 		"gemini-2.5-computer-use-preview-10-2025",
@@ -260,7 +255,6 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 	return fallbackModels, nil
 }
 
-// SupportsModel checks if the provider supports the given model
 func (p *AntigravityProvider) SupportsModel(model string) bool {
 	supportedModels, err := p.ListModels(context.Background())
 	if err != nil {
@@ -275,22 +269,6 @@ func (p *AntigravityProvider) SupportsModel(model string) bool {
 	return false
 }
 
-// ChatCompletion is not supported for OpenAI-compatible API
-// This provider is kept for future native protocol implementation
-func (p *AntigravityProvider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error) {
-	return nil, fmt.Errorf("provider 'antigravity' does not support OpenAI-compatible API. Use native protocol access instead")
-}
-
-// StreamChatCompletion is not supported for OpenAI-compatible API
-// This provider is kept for future native protocol implementation
-func (p *AntigravityProvider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error) {
-	errChan := make(chan error, 1)
-	errChan <- fmt.Errorf("provider 'antigravity' does not support OpenAI-compatible API. Use native protocol access instead")
-	close(errChan)
-	return make(chan openai.ChatCompletionStreamResponse), errChan
-}
-
-// geminiTokenProvider adapts auth.GeminiAuthenticator to cloudauth.TokenProvider (like POC)
 type geminiTokenProvider struct {
 	authenticator *auth.GeminiAuthenticator
 }
@@ -304,7 +282,6 @@ func (p *geminiTokenProvider) Token(ctx context.Context) (*cloudauth.Token, erro
 		return nil, err
 	}
 
-	// Log token info (first 20 chars only for security)
 	tokenPreview := token
 	if len(token) > 20 {
 		tokenPreview = token[:20] + "..."
@@ -319,9 +296,7 @@ func (p *geminiTokenProvider) Token(ctx context.Context) (*cloudauth.Token, erro
 	}, nil
 }
 
-// discoverProjectIDWithGeminiAuth helps find the project ID needed for API using auth.GeminiAuthenticator (like POC)
 func discoverProjectIDWithGeminiAuth(ctx context.Context, authenticator *auth.GeminiAuthenticator, baseURL string) (string, error) {
-	// Force refresh at the beginning (like POC)
 	authenticator.ForceRefresh(ctx)
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -386,7 +361,6 @@ func discoverProjectIDWithGeminiAuth(ctx context.Context, authenticator *auth.Ge
 	return "", fmt.Errorf("failed to discover project ID after retries")
 }
 
-// discoverProjectID helps find the project ID needed for API
 func discoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		token, err := authenticator.GetToken(ctx)

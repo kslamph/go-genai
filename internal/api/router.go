@@ -77,7 +77,7 @@ func (s *Server) HandleProviderListModels(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	models, err := s.pm.ListProviderModels(r.Context(), providerType)
+	models, err := s.pm.ListOpenAIProviderModels(r.Context(), providerType)
 	if err != nil {
 		utils.L().Errorf("Failed to list models for provider %s: %v", providerType, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -193,7 +193,7 @@ func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, selectionReason, err := s.pm.GetProviderByModelForOpenAI(req.Model)
+	p, selectionReason, err := s.pm.GetOpenAIProviderByModelWithReason(req.Model)
 	if err != nil {
 		utils.L().Errorf("Failed to find OpenAI-compatible provider for model %s: %v", req.Model, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -229,9 +229,9 @@ func (s *Server) HandleProviderChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, selectionReason, err := s.pm.GetProviderWithReason(providerType, req.Model)
+	p, selectionReason, err := s.pm.GetOpenAIProviderWithReason(providerType, req.Model)
 	if err != nil {
-		utils.L().Errorf("Failed to find provider %s for model %s: %v", providerType, req.Model, err)
+		utils.L().Errorf("Failed to find OpenAI-compatible provider %s for model %s: %v", providerType, req.Model, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -242,7 +242,7 @@ func (s *Server) HandleProviderChat(w http.ResponseWriter, r *http.Request) {
 	s.executeChat(w, r, p, req)
 }
 
-func (s *Server) executeChat(w http.ResponseWriter, r *http.Request, p provider.Provider, req openai.ChatCompletionRequest) {
+func (s *Server) executeChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {
 	if req.Stream {
 		s.streamChat(w, r, p, req)
 	} else {
@@ -250,7 +250,7 @@ func (s *Server) executeChat(w http.ResponseWriter, r *http.Request, p provider.
 	}
 }
 
-func (s *Server) normalChat(w http.ResponseWriter, r *http.Request, p provider.Provider, req openai.ChatCompletionRequest) {
+func (s *Server) normalChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {
 	resp, err := p.ChatCompletion(r.Context(), req)
 	if err != nil {
 		utils.L().Errorf("Provider %s failed: %v", p.Name(), err)
@@ -311,7 +311,7 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
-func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p provider.Provider, req openai.ChatCompletionRequest) {
+func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {
 	respChan, errChan := p.StreamChatCompletion(r.Context(), req)
 
 	w.Header().Set("Content-Type", "text/event-stream")

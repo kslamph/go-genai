@@ -9,7 +9,7 @@ import (
 	"net/http"
 
 	cloudauth "cloud.google.com/go/auth"
-	"github.com/sashabaranov/go-openai"
+	"github.com/sunbankio/omniproxy/internal/provider"
 	"google.golang.org/genai"
 )
 
@@ -24,8 +24,6 @@ type GeminiProvider struct {
 }
 
 // NewProvider creates a new Gemini provider with auth
-// Note: This provider is NOT available for OpenAI-compatible API requests.
-// It's kept for future native protocol implementation.
 func NewProvider(ctx context.Context, name string, auth *Authenticator) (*GeminiProvider, error) {
 	// 1. Discover Project ID
 	projectID, err := discoverProjectID(ctx, auth, CloudCodeBaseURL)
@@ -63,17 +61,18 @@ func (p *GeminiProvider) Name() string {
 	return p.name
 }
 
-// GetClient returns the underlying genai.Client for native protocol access
+func (p *GeminiProvider) SupportedProtocols() []provider.Protocol {
+	return []provider.Protocol{provider.ProtocolGemini}
+}
+
 func (p *GeminiProvider) GetClient() *genai.Client {
 	return p.client
 }
 
-// GetAuth returns the authenticator for native protocol access
 func (p *GeminiProvider) GetAuth() *Authenticator {
 	return p.auth
 }
 
-// ListModels returns a list of models supported by the provider
 func (p *GeminiProvider) ListModels(ctx context.Context) ([]string, error) {
 	return []string{
 		"gemini-2.5-flash",
@@ -86,7 +85,6 @@ func (p *GeminiProvider) ListModels(ctx context.Context) ([]string, error) {
 	}, nil
 }
 
-// SupportsModel checks if the provider supports the given model
 func (p *GeminiProvider) SupportsModel(model string) bool {
 	supportedModels, err := p.ListModels(context.Background())
 	if err != nil {
@@ -99,21 +97,6 @@ func (p *GeminiProvider) SupportsModel(model string) bool {
 		}
 	}
 	return false
-}
-
-// ChatCompletion is not supported for OpenAI-compatible API
-// This provider is kept for future native protocol implementation
-func (p *GeminiProvider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error) {
-	return nil, fmt.Errorf("provider 'gemini' does not support OpenAI-compatible API. Use native protocol access instead")
-}
-
-// StreamChatCompletion is not supported for OpenAI-compatible API
-// This provider is kept for future native protocol implementation
-func (p *GeminiProvider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error) {
-	errChan := make(chan error, 1)
-	errChan <- fmt.Errorf("provider 'gemini' does not support OpenAI-compatible API. Use native protocol access instead")
-	close(errChan)
-	return make(chan openai.ChatCompletionStreamResponse), errChan
 }
 
 // discoverProjectID helps find the project ID needed for Gemini API

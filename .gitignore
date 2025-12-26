@@ -1,1 +1,6 @@
 reference/
+server.log
+omniproxy_console.log
+request-*.json
+response-*.json
+omniproxy

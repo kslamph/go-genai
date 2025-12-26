@@ -2,9 +2,8 @@ package kiro
 
 import (
 	"context"
-	"fmt"
 
-	"github.com/sashabaranov/go-openai"
+	"github.com/sunbankio/omniproxy/internal/provider"
 )
 
 type Provider struct {
@@ -14,8 +13,6 @@ type Provider struct {
 }
 
 // NewProvider creates a new Kiro provider with auth
-// Note: This provider is NOT available for OpenAI-compatible API requests.
-// It's kept for future native protocol implementation.
 func NewProvider(name string, auth *Authenticator) *Provider {
 	return &Provider{
 		auth:   auth,
@@ -32,17 +29,18 @@ func (p *Provider) Name() string {
 	return p.name
 }
 
-// GetAuth returns the authenticator for native protocol access
-func (p *Provider) GetAuth() *Authenticator {
+func (p *Provider) SupportedProtocols() []provider.Protocol {
+	return []provider.Protocol{provider.ProtocolKiro}
+}
+
+func (p *Provider) GetAuth() interface{} {
 	return p.auth
 }
 
-// GetRegion returns the AWS region for this provider
 func (p *Provider) GetRegion() string {
 	return p.region
 }
 
-// ListModels returns a list of models supported by the provider
 func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 	return []string{
 		"claude-opus-4-5",
@@ -55,7 +53,6 @@ func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 	}, nil
 }
 
-// SupportsModel checks if the provider supports the given model
 func (p *Provider) SupportsModel(model string) bool {
 	supportedModels, err := p.ListModels(context.Background())
 	if err != nil {
@@ -68,19 +65,4 @@ func (p *Provider) SupportsModel(model string) bool {
 		}
 	}
 	return false
-}
-
-// ChatCompletion is not supported for OpenAI-compatible API
-// This provider is kept for future native protocol implementation
-func (p *Provider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error) {
-	return nil, fmt.Errorf("provider 'kiro' does not support OpenAI-compatible API. Use native protocol access instead")
-}
-
-// StreamChatCompletion is not supported for OpenAI-compatible API
-// This provider is kept for future native protocol implementation
-func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error) {
-	errChan := make(chan error, 1)
-	errChan <- fmt.Errorf("provider 'kiro' does not support OpenAI-compatible API. Use native protocol access instead")
-	close(errChan)
-	return make(chan openai.ChatCompletionStreamResponse), errChan
 }

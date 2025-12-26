@@ -16,8 +16,8 @@ type Provider struct {
 	name   string
 }
 
-// Ensure Provider implements provider.Provider
-var _ provider.Provider = (*Provider)(nil)
+// Ensure Provider implements provider.OpenAICompatibleProvider
+var _ provider.OpenAICompatibleProvider = (*Provider)(nil)
 
 func NewProvider(name string, auth *Authenticator) *Provider {
 	config := openai.DefaultConfig("") // Token injected via transport
@@ -40,6 +40,10 @@ func (p *Provider) Type() string {
 
 func (p *Provider) Name() string {
 	return p.name
+}
+
+func (p *Provider) SupportedProtocols() []provider.Protocol {
+	return []provider.Protocol{provider.ProtocolOpenAI}
 }
 
 func (p *Provider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error) {
