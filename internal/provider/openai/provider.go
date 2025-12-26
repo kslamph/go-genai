@@ -36,7 +36,7 @@ func (p *Provider) Name() string {
 	return p.name
 }
 
-func (p *Provider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
+func (p *Provider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error) {
 	resp, err := p.client.CreateChatCompletion(ctx, req)
 	if err != nil {
 		return nil, p.wrapError(err)

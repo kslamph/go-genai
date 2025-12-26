@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -68,6 +69,14 @@ func (s *Server) HandleListModels(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) HandleProviderListModels(w http.ResponseWriter, r *http.Request) {
 	providerType := chi.URLParam(r, "provider")
+
+	// Only allow qwen and iflow providers for OpenAI-compatible API
+	if providerType != "qwen" && providerType != "iflow" {
+		utils.L().Warnf("Provider %s not available for OpenAI-compatible API", providerType)
+		http.Error(w, fmt.Sprintf("provider '%s' is not available for OpenAI-compatible API. Available providers: qwen, iflow", providerType), http.StatusNotFound)
+		return
+	}
+
 	models, err := s.pm.ListProviderModels(r.Context(), providerType)
 	if err != nil {
 		utils.L().Errorf("Failed to list models for provider %s: %v", providerType, err)
@@ -119,6 +128,17 @@ func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Log the raw request body (debug only)
 	utils.L().Debugw("Raw HTTP request body", "body", string(bodyBytes))
+
+	// Save raw request to file for inspection (debug mode only)
+	if utils.IsDebugMode() {
+		timestamp := time.Now().Format("20060102-150405.000")
+		filename := fmt.Sprintf("request-%s.json", timestamp)
+		if err := os.WriteFile(filename, bodyBytes, 0644); err != nil {
+			utils.L().Warnw("Failed to write request to file", "error", err, "filename", filename)
+		} else {
+			utils.L().Infow("Saved request to file", "filename", filename)
+		}
+	}
 
 	// Restore the body for decoding
 	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
@@ -173,9 +193,9 @@ func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, selectionReason, err := s.pm.GetProviderByModelWithReason(req.Model)
+	p, selectionReason, err := s.pm.GetProviderByModelForOpenAI(req.Model)
 	if err != nil {
-		utils.L().Errorf("Failed to find provider for model %s: %v", req.Model, err)
+		utils.L().Errorf("Failed to find OpenAI-compatible provider for model %s: %v", req.Model, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -195,6 +215,14 @@ func truncate(s string, maxLen int) string {
 
 func (s *Server) HandleProviderChat(w http.ResponseWriter, r *http.Request) {
 	providerType := chi.URLParam(r, "provider")
+
+	// Only allow qwen and iflow providers for OpenAI-compatible API
+	if providerType != "qwen" && providerType != "iflow" {
+		utils.L().Warnf("Provider %s not available for OpenAI-compatible API", providerType)
+		http.Error(w, fmt.Sprintf("provider '%s' is not available for OpenAI-compatible API. Available providers: qwen, iflow", providerType), http.StatusNotFound)
+		return
+	}
+
 	var req openai.ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -232,6 +260,20 @@ func (s *Server) normalChat(w http.ResponseWriter, r *http.Request, p provider.P
 	}
 
 	s.pm.RecordSuccess(req.Model, p)
+
+	// Save response to file for inspection (debug mode only)
+	if utils.IsDebugMode() {
+		respBytes, err := json.MarshalIndent(resp, "", "  ")
+		if err == nil {
+			timestamp := time.Now().Format("20060102-150405.000")
+			filename := fmt.Sprintf("response-%s.json", timestamp)
+			if err := os.WriteFile(filename, respBytes, 0644); err != nil {
+				utils.L().Warnw("Failed to write response to file", "error", err, "filename", filename)
+			} else {
+				utils.L().Infow("Saved response to file", "filename", filename)
+			}
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {

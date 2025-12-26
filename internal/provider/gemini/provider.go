@@ -7,12 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
-	"time"
 
 	cloudauth "cloud.google.com/go/auth"
 	"github.com/sashabaranov/go-openai"
-	"github.com/sunbankio/omniproxy/internal/provider"
 	"google.golang.org/genai"
 )
 
@@ -26,9 +23,9 @@ type GeminiProvider struct {
 	auth   *Authenticator
 }
 
-// Ensure GeminiProvider implements provider.Provider
-var _ provider.Provider = (*GeminiProvider)(nil)
-
+// NewProvider creates a new Gemini provider with auth
+// Note: This provider is NOT available for OpenAI-compatible API requests.
+// It's kept for future native protocol implementation.
 func NewProvider(ctx context.Context, name string, auth *Authenticator) (*GeminiProvider, error) {
 	// 1. Discover Project ID
 	projectID, err := discoverProjectID(ctx, auth, CloudCodeBaseURL)
@@ -66,119 +63,17 @@ func (p *GeminiProvider) Name() string {
 	return p.name
 }
 
-func (p *GeminiProvider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
-	sys, contents, config, err := ToGeminiRequest(req)
-	if err != nil {
-		return nil, err
-	}
-
-	if sys != nil {
-		config.SystemInstruction = sys
-	}
-
-	// The genai library's GenerateContent method signature might vary slightly depending on version,
-	// but generally takes model, contents, and config.
-	// We assume "gemini-2.5-flash" or similar model is passed in req.Model
-	resp, err := p.client.Models.GenerateContent(ctx, req.Model, contents, config)
-	if err != nil {
-		return nil, p.wrapError(err)
-	}
-
-	return FromGeminiResponse(resp, req.Model), nil
+// GetClient returns the underlying genai.Client for native protocol access
+func (p *GeminiProvider) GetClient() *genai.Client {
+	return p.client
 }
 
-// wrapError converts genai errors to ProviderError with proper status codes
-func (p *GeminiProvider) wrapError(err error) error {
-	errStr := err.Error()
-	
-	// Parse genai error format: "Error 429, Message: ..., Status: RESOURCE_EXHAUSTED, Details: [...]"
-	statusCode := http.StatusInternalServerError
-	message := errStr
-	var details interface{}
-	
-	// Extract status code
-	if idx := strings.Index(errStr, "Error "); idx >= 0 {
-		var code int
-		if _, scanErr := fmt.Sscanf(errStr[idx:], "Error %d", &code); scanErr == nil {
-			statusCode = code
-		}
-	}
-	
-	// Extract message
-	if idx := strings.Index(errStr, "Message: "); idx >= 0 {
-		endIdx := strings.Index(errStr[idx:], ", Status:")
-		if endIdx > 0 {
-			message = errStr[idx+9 : idx+endIdx]
-		}
-	}
-	
-	// Extract status and de for additional context
-	if idx := strings.Index(errStr, "Status: "); idx >= 0 {
-		detailsIdx := strings.Index(errStr[idx:], "Details:")
-		if detailsIdx > 0 {
-			details = map[string]string{
-				"status":  errStr[idx+8 : idx+detailsIdx-2],
-				"details": errStr[idx+detailsIdx:],
-			}
-		}
-	}
-	
-	return provider.NewProviderError(statusCode, message, p.name, details)
+// GetAuth returns the authenticator for native protocol access
+func (p *GeminiProvider) GetAuth() *Authenticator {
+	return p.auth
 }
 
-func (p *GeminiProvider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error) {
-	respChan := make(chan openai.ChatCompletionStreamResponse)
-	errChan := make(chan error, 1)
-
-	sys, contents, config, err := ToGeminiRequest(req)
-	if err != nil {
-		errChan <- p.wrapError(err)
-		close(respChan)
-		close(errChan)
-		return respChan, errChan
-	}
-
-	if sys != nil {
-		config.SystemInstruction = sys
-	}
-
-	go func() {
-		defer close(respChan)
-		defer close(errChan)
-
-		iter := p.client.Models.GenerateContentStream(ctx, req.Model, contents, config)
-		for resp, err := range iter {
-			if err != nil {
-				errChan <- p.wrapError(err)
-				return
-			}
-
-			chunk := FromGeminiChunk(resp, req.Model)
-			respChan <- *chunk
-		}
-
-		// Send final chunk with finish_reason=stop to properly signal stream termination
-		finalChunk := openai.ChatCompletionStreamResponse{
-			ID:      "chatcmpl-gemini",
-			Object:  "chat.completion.chunk",
-			Created: time.Now().Unix(),
-			Model:   req.Model,
-			Choices: []openai.ChatCompletionStreamChoice{
-				{
-					Index: 0,
-					Delta: openai.ChatCompletionStreamChoiceDelta{
-						Content: "",
-					},
-					FinishReason: openai.FinishReasonStop,
-				},
-			},
-		}
-		respChan <- finalChunk
-	}()
-
-	return respChan, errChan
-}
-
+// ListModels returns a list of models supported by the provider
 func (p *GeminiProvider) ListModels(ctx context.Context) ([]string, error) {
 	return []string{
 		"gemini-2.5-flash",
@@ -191,18 +86,34 @@ func (p *GeminiProvider) ListModels(ctx context.Context) ([]string, error) {
 	}, nil
 }
 
+// SupportsModel checks if the provider supports the given model
 func (p *GeminiProvider) SupportsModel(model string) bool {
 	supportedModels, err := p.ListModels(context.Background())
 	if err != nil {
 		return false
 	}
-	
+
 	for _, supported := range supportedModels {
 		if supported == model {
 			return true
 		}
 	}
 	return false
+}
+
+// ChatCompletion is not supported for OpenAI-compatible API
+// This provider is kept for future native protocol implementation
+func (p *GeminiProvider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error) {
+	return nil, fmt.Errorf("provider 'gemini' does not support OpenAI-compatible API. Use native protocol access instead")
+}
+
+// StreamChatCompletion is not supported for OpenAI-compatible API
+// This provider is kept for future native protocol implementation
+func (p *GeminiProvider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error) {
+	errChan := make(chan error, 1)
+	errChan <- fmt.Errorf("provider 'gemini' does not support OpenAI-compatible API. Use native protocol access instead")
+	close(errChan)
+	return make(chan openai.ChatCompletionStreamResponse), errChan
 }
 
 // discoverProjectID helps find the project ID needed for Gemini API

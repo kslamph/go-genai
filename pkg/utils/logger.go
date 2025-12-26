@@ -92,3 +92,8 @@ func CloseLogger() {
 		debugFile.Close()
 	}
 }
+
+// IsDebugMode returns whether debug mode is enabled
+func IsDebugMode() bool {
+	return debugMode
+}

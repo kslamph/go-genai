@@ -17,7 +17,8 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "omniproxy.yaml", "Path to the configuration file")
+	defaultConfigPath := config.GetDefaultConfigPath()
+	configPath := flag.String("config", defaultConfigPath, "Path to the configuration file")
 	port := flag.Int("port", 8143, "Port to listen on")
 	logLevel := flag.String("log-level", "info", "Log level (debug, info, warn, error)")
 	debug := flag.Bool("debug", false, "Enable debug mode (writes debug logs to server.log)")

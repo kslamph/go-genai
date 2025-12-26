@@ -276,6 +276,7 @@ func (pm *PoolManager) GetProviderByModel(model string) (provider.Provider, erro
 }
 
 // GetProviderByModelWithReason finds a provider by model name across all pools and returns the selection reason
+// Note: This method searches across ALL providers. For OpenAI-compatible API, use GetProviderByModelForOpenAI.
 func (pm *PoolManager) GetProviderByModelWithReason(model string) (provider.Provider, string, error) {
 	pm.mu.RLock()
 	last := pm.lastSuccess[model]
@@ -305,6 +306,40 @@ func (pm *PoolManager) GetProviderByModelWithReason(model string) (provider.Prov
 	return selected, "round-robin", nil
 }
 
+// GetProviderByModelForOpenAI finds a provider by model name but only within OpenAI-compatible providers (qwen, iflow)
+// This is used for the OpenAI-compatible API endpoints
+func (pm *PoolManager) GetProviderByModelForOpenAI(model string) (provider.Provider, string, error) {
+	pm.mu.RLock()
+	last := pm.lastSuccess[model]
+	pm.mu.RUnlock()
+
+	// Check if last successful provider still supports this model and is OpenAI-compatible
+	openAICompatibleTypes := map[string]bool{"qwen": true, "iflow": true}
+	if last != nil && last.SupportsModel(model) && openAICompatibleTypes[last.Type()] {
+		return last, "last success", nil
+	}
+
+	// Find all OpenAI-compatible providers that support this model
+	var candidates []provider.Provider
+	for _, poolType := range []string{"qwen", "iflow"} {
+		if pool, ok := pm.pools[poolType]; ok {
+			for _, p := range pool {
+				if p.SupportsModel(model) {
+					candidates = append(candidates, p)
+				}
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil, "", fmt.Errorf("no OpenAI-compatible providers found for model: %s", model)
+	}
+
+	// Use smart selection with failure tracking
+	selected := pm.selectProviderWithFailureTracking(candidates, "openai-model:"+model)
+	return selected, "round-robin", nil
+}
+
 // RecordSuccess records a successful request for a model
 func (pm *PoolManager) RecordSuccess(model string, p provider.Provider) {
 	pm.mu.Lock()
@@ -321,18 +356,14 @@ func (pm *PoolManager) RecordFailure(p provider.Provider) {
 	pm.failureCount[p.Name()]++
 }
 
-// ListModels returns a list of all models from all providers
+// ListModels returns a list of all models from OpenAI-compatible providers (qwen, iflow)
 func (pm *PoolManager) ListModels(ctx context.Context) ([]string, error) {
 	uniqueModels := make(map[string]bool)
 	var models []string
 
-	// Iterate over all providers
-	// To avoid too many calls, maybe we just call one from each pool?
-	// But different credentials might (unlikely) see different models.
-	// Typically models are per provider type.
-	
-	for _, pool := range pm.pools {
-		if len(pool) > 0 {
+	// Only iterate over OpenAI-compatible providers (qwen, iflow)
+	for _, poolType := range []string{"qwen", "iflow"} {
+		if pool, ok := pm.pools[poolType]; ok && len(pool) > 0 {
 			// Just ask the first provider in the pool
 			p := pool[0]
 			ms, err := p.ListModels(ctx)

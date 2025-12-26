@@ -10,11 +10,65 @@ import (
 	"google.golang.org/genai"
 )
 
+// CustomToolCall extends openai.ToolCall to support extra_content for thought signatures
+type CustomToolCall struct {
+	openai.ToolCall
+	ExtraContent map[string]interface{} `json:"extra_content,omitempty"`
+}
+
+// CustomToolCallExtraContent represents the extra_content structure for thought signatures
+type CustomToolCallExtraContent struct {
+	Google GoogleExtraContent `json:"google"`
+}
+
+// GoogleExtraContent represents Google-specific extra content
+type GoogleExtraContent struct {
+	ThoughtSignature []byte `json:"thought_signature,omitempty"`
+}
+
+// CustomMessage extends openai.ChatCompletionMessage to use CustomToolCall
+type CustomMessage struct {
+	Role      string           `json:"role"`
+	Content   string           `json:"content,omitempty"`
+	ToolCalls []CustomToolCall `json:"tool_calls,omitempty"`
+}
+
+// CustomChoice extends openai.ChatCompletionChoice to use CustomMessage
+type CustomChoice struct {
+	Index        int           `json:"index"`
+	Message      CustomMessage `json:"message"`
+	FinishReason string        `json:"finish_reason"`
+}
+
+// CustomChatCompletionResponse extends openai.ChatCompletionResponse to use CustomChoice
+type CustomChatCompletionResponse struct {
+	ID      string                `json:"id"`
+	Object  string                `json:"object"`
+	Created int64                 `json:"created"`
+	Model   string                `json:"model"`
+	Choices []CustomChoice        `json:"choices"`
+	Usage   openai.Usage          `json:"usage"`
+	SystemFingerprint string      `json:"system_fingerprint,omitempty"`
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // ToGeminiRequest converts OpenAI request to Gemini request parts
 // It returns system instruction (if any), a list of contents, and config
 func ToGeminiRequest(req openai.ChatCompletionRequest) (*genai.Content, []*genai.Content, *genai.GenerateContentConfig, error) {
 	var systemInstruction *genai.Content
 	var contents []*genai.Content
+
+	// Debug: Log the entire incoming request
+	reqJSON, _ := json.MarshalIndent(req, "", "  ")
+	utils.L().Debugw("=== ToGeminiRequest: Incoming OpenAI Request ===",
+		"request", string(reqJSON))
 
 	// Map to track tool call IDs to function names for later reference
 	toolCallIDToFunctionName := make(map[string]string)
@@ -111,19 +165,72 @@ func ToGeminiRequest(req openai.ChatCompletionRequest) (*genai.Content, []*genai
 						}
 					}
 
+					// Extract thought_signature from extra_content if present
+					var thoughtSignature []byte
+					toolCallJSON, err := json.Marshal(toolCall)
+					if err == nil {
+						var toolCallMap map[string]interface{}
+						if err := json.Unmarshal(toolCallJSON, &toolCallMap); err == nil {
+							utils.L().Debugw("Tool call as map",
+								"tool_call_id", toolCall.ID,
+								"tool_call_map", toolCallMap)
+
+							if extraContent, ok := toolCallMap["extra_content"].(map[string]interface{}); ok {
+								utils.L().Debugw("Found extra_content in tool call",
+									"tool_call_id", toolCall.ID,
+									"extra_content", extraContent)
+
+								if google, ok := extraContent["google"].(map[string]interface{}); ok {
+									utils.L().Debugw("Found google field in extra_content",
+										"tool_call_id", toolCall.ID,
+										"google", google)
+
+									if sig, ok := google["thought_signature"].(string); ok {
+										thoughtSignature = []byte(sig)
+										sigPreview := sig
+										if len(sig) > 50 {
+											sigPreview = sig[:50]
+										}
+										utils.L().Infow("✓ Extracted thought_signature from extra_content",
+											"tool_call_id", toolCall.ID,
+											"signature_length", len(thoughtSignature),
+											"signature_preview", sigPreview)
+									} else {
+										utils.L().Warnw("thought_signature field not found or wrong type in google",
+											"tool_call_id", toolCall.ID)
+									}
+								} else {
+									utils.L().Warnw("google field not found or wrong type in extra_content",
+										"tool_call_id", toolCall.ID)
+								}
+							} else {
+								utils.L().Debugw("No extra_content in tool call",
+									"tool_call_id", toolCall.ID)
+							}
+						}
+					}
+
 					utils.L().Debugw("Converting tool call",
 						"index", j,
 						"id", toolCall.ID,
 						"function_name", toolCall.Function.Name,
-						"args", args)
+						"args", args,
+						"has_thought_signature", len(thoughtSignature) > 0)
 
-					parts = append(parts, &genai.Part{
+					part := &genai.Part{
 						FunctionCall: &genai.FunctionCall{
 							ID:   toolCall.ID,
 							Name: toolCall.Function.Name,
 							Args: args,
 						},
-					})
+					}
+
+					// Add thought_signature if present
+					if len(thoughtSignature) > 0 {
+						part.ThoughtSignature = thoughtSignature
+					}
+
+					parts = append(parts, part)
 				}
 			}
 
@@ -311,6 +418,49 @@ func ToGeminiRequest(req openai.ChatCompletionRequest) (*genai.Content, []*genai
 		}
 	}
 
+	// Debug: Log what we're sending to Gemini
+	utils.L().Debugw("=== ToGeminiRequest: Sending to Gemini ===",
+		"num_contents", len(contents),
+		"has_system_instruction", systemInstruction != nil)
+
+	for i, content := range contents {
+		utils.L().Debugw("Gemini Content",
+			"index", i,
+			"role", content.Role,
+			"num_parts", len(content.Parts))
+
+		for j, part := range content.Parts {
+			partInfo := map[string]interface{}{
+				"index":                 j,
+				"has_text":              part.Text != "",
+				"has_function_call":     part.FunctionCall != nil,
+				"has_function_response": part.FunctionResponse != nil,
+				"has_thought_signature": len(part.ThoughtSignature) > 0,
+			}
+
+			if part.FunctionCall != nil {
+				partInfo["function_call_id"] = part.FunctionCall.ID
+				partInfo["function_call_name"] = part.FunctionCall.Name
+			}
+
+			if part.FunctionResponse != nil {
+				partInfo["function_response_id"] = part.FunctionResponse.ID
+				partInfo["function_response_name"] = part.FunctionResponse.Name
+			}
+
+			if len(part.ThoughtSignature) > 0 {
+				sigPreview := string(part.ThoughtSignature)
+				if len(sigPreview) > 50 {
+					sigPreview = sigPreview[:50]
+				}
+				partInfo["thought_signature_length"] = len(part.ThoughtSignature)
+				partInfo["thought_signature_preview"] = sigPreview
+			}
+
+			utils.L().Debugw("  Part", "info", partInfo)
+		}
+	}
+
 	return systemInstruction, contents, config, nil
 }
 
@@ -378,15 +528,20 @@ var finishReasonMap = map[genai.FinishReason]openai.FinishReason{
 }
 
 // FromGeminiResponse converts Gemini response to OpenAI response
-func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *openai.ChatCompletionResponse {
+// Returns CustomChatCompletionResponse to preserve extra_content with thought_signature
+func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *CustomChatCompletionResponse {
+	utils.L().Debugw("=== FromGeminiResponse: Received from Gemini ===",
+		"model", model,
+		"num_candidates", len(resp.Candidates))
+
 	created := time.Now().Unix()
 	if !resp.CreateTime.IsZero() {
 		created = resp.CreateTime.Unix()
 	}
 
 	var content string
-	var toolCalls []openai.ToolCall
-	var finishReason openai.FinishReason = openai.FinishReasonStop
+	var toolCalls []CustomToolCall
+	var finishReason string = "stop"
 
 	if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
 		parts := resp.Candidates[0].Content.Parts
@@ -394,6 +549,16 @@ func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *open
 		utils.L().Debugw("Processing Gemini response parts",
 			"num_parts", len(parts),
 			"model", model)
+
+		// Debug: Log each part from Gemini
+		for i, p := range parts {
+			utils.L().Debugw("Gemini Response Part",
+				"index", i,
+				"has_text", p.Text != "",
+				"has_function_call", p.FunctionCall != nil,
+				"has_thought_signature", len(p.ThoughtSignature) > 0,
+				"thought_signature_length", len(p.ThoughtSignature))
+		}
 
 		for i, p := range parts {
 			// Handle text content
@@ -410,7 +575,21 @@ func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *open
 					"index", i,
 					"function_name", p.FunctionCall.Name,
 					"function_id", p.FunctionCall.ID,
-					"args", p.FunctionCall.Args)
+					"args", p.FunctionCall.Args,
+					"has_thought_signature", len(p.ThoughtSignature) > 0)
+
+				// Log raw thought_signature details from genai library
+				if len(p.ThoughtSignature) > 0 {
+					sigPreview := string(p.ThoughtSignature)
+					if len(sigPreview) > 50 {
+						sigPreview = sigPreview[:50]
+					}
+					utils.L().Debugw("Raw thought_signature from genai library",
+						"tool_call_id", p.FunctionCall.ID,
+						"signature_length", len(p.ThoughtSignature),
+						"signature_preview_bytes", fmt.Sprintf("%v", p.ThoughtSignature[:min(20, len(p.ThoughtSignature))]),
+						"signature_preview_string", sigPreview)
+				}
 
 				// Convert args map to JSON string
 				argsJSON, err := json.Marshal(p.FunctionCall.Args)
@@ -421,19 +600,36 @@ func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *open
 					argsJSON = []byte("{}")
 				}
 
-				toolCall := openai.ToolCall{
-					ID:   p.FunctionCall.ID,
-					Type: openai.ToolTypeFunction,
-					Function: openai.FunctionCall{
-						Name:      p.FunctionCall.Name,
-						Arguments: string(argsJSON),
+				// If ID is empty, generate one
+				toolCallID := p.FunctionCall.ID
+				if toolCallID == "" {
+					toolCallID = fmt.Sprintf("call_%d", i)
+					utils.L().Debugw("Generated tool call ID", "id", toolCallID)
+				}
+
+				// Create CustomToolCall with base ToolCall fields
+				toolCall := CustomToolCall{
+					ToolCall: openai.ToolCall{
+						ID:   toolCallID,
+						Type: openai.ToolTypeFunction,
+						Function: openai.FunctionCall{
+							Name:      p.FunctionCall.Name,
+							Arguments: string(argsJSON),
+						},
 					},
 				}
 
-				// If ID is empty, generate one
-				if toolCall.ID == "" {
-					toolCall.ID = fmt.Sprintf("call_%d", i)
-					utils.L().Debugw("Generated tool call ID", "id", toolCall.ID)
+				// Add thought_signature to extra_content following Gemini's OpenAI compatibility format
+				if len(p.ThoughtSignature) > 0 {
+					toolCall.ExtraContent = map[string]interface{}{
+						"google": GoogleExtraContent{
+							ThoughtSignature: p.ThoughtSignature,
+						},
+					}
+					utils.L().Infow("Preserved thought_signature in extra_content",
+						"tool_call_id", toolCallID,
+						"signature_length", len(p.ThoughtSignature),
+						"signature_type", "[]byte (will be base64-encoded in JSON)")
 				}
 
 				toolCalls = append(toolCalls, toolCall)
@@ -443,7 +639,7 @@ func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *open
 		// Get finish reason from candidate
 		if resp.Candidates[0].FinishReason != "" {
 			if mapped, ok := finishReasonMap[resp.Candidates[0].FinishReason]; ok {
-				finishReason = mapped
+				finishReason = string(mapped)
 			}
 			utils.L().Debugw("Mapped finish reason",
 				"gemini_reason", resp.Candidates[0].FinishReason,
@@ -452,7 +648,7 @@ func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *open
 
 		// If we have tool calls, set finish reason to tool_calls
 		if len(toolCalls) > 0 {
-			finishReason = openai.FinishReasonToolCalls
+			finishReason = "tool_calls"
 			utils.L().Infow("Response contains tool calls",
 				"num_tool_calls", len(toolCalls),
 				"finish_reason", finishReason)
@@ -464,8 +660,9 @@ func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *open
 		responseID = "chatcmpl-gemini"
 	}
 
-	message := openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleAssistant,
+	// Build CustomMessage with tool calls
+	message := CustomMessage{
+		Role:    "assistant",
 		Content: content,
 	}
 
@@ -474,7 +671,7 @@ func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *open
 		message.ToolCalls = toolCalls
 	}
 
-	choices := []openai.ChatCompletionChoice{
+	choices := []CustomChoice{
 		{
 			Index:        0,
 			Message:      message,
@@ -489,7 +686,7 @@ func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *open
 		usage.TotalTokens = int(resp.UsageMetadata.PromptTokenCount + resp.UsageMetadata.CandidatesTokenCount)
 	}
 
-	return &openai.ChatCompletionResponse{
+	customResp := &CustomChatCompletionResponse{
 		ID:      responseID,
 		Object:  "chat.completion",
 		Created: created,
@@ -497,6 +694,13 @@ func FromGeminiResponse(resp *genai.GenerateContentResponse, model string) *open
 		Choices: choices,
 		Usage:   usage,
 	}
+
+	// Debug: Log what we're sending to client
+	respJSON, _ := json.MarshalIndent(customResp, "", "  ")
+	utils.L().Debugw("=== FromGeminiResponse: Sending to Client ===",
+		"response", string(respJSON))
+
+	return customResp
 }
 
 // FromGeminiChunk converts Gemini stream chunk to OpenAI chunk
@@ -532,7 +736,8 @@ func FromGeminiChunk(resp *genai.GenerateContentResponse, model string) *openai.
 					"index", i,
 					"function_name", p.FunctionCall.Name,
 					"function_id", p.FunctionCall.ID,
-					"args", p.FunctionCall.Args)
+					"args", p.FunctionCall.Args,
+					"has_thought_signature", len(p.ThoughtSignature) > 0)
 
 				// Convert args map to JSON string
 				argsJSON, err := json.Marshal(p.FunctionCall.Args)
@@ -543,24 +748,58 @@ func FromGeminiChunk(resp *genai.GenerateContentResponse, model string) *openai.
 					argsJSON = []byte("{}")
 				}
 
-				toolCall := openai.ToolCall{
-					ID:   p.FunctionCall.ID,
-					Type: openai.ToolTypeFunction,
-					Function: openai.FunctionCall{
-						Name:      p.FunctionCall.Name,
-						Arguments: string(argsJSON),
+				// If ID is empty, generate one
+				toolCallID := p.FunctionCall.ID
+				if toolCallID == "" {
+					toolCallID = fmt.Sprintf("call_%d", i)
+					utils.L().Debugw("Generated tool call ID in stream", "id", toolCallID)
+				}
+
+				// Build tool call with thought_signature in extra_content if present
+				toolCallMap := map[string]interface{}{
+					"id":   toolCallID,
+					"type": string(openai.ToolTypeFunction),
+					"function": map[string]interface{}{
+						"name":      p.FunctionCall.Name,
+						"arguments": string(argsJSON),
 					},
 				}
 
-				// If ID is empty, generate one
-				if toolCall.ID == "" {
-					toolCall.ID = fmt.Sprintf("call_%d", i)
-					utils.L().Debugw("Generated tool call ID in stream", "id", toolCall.ID)
+				// Add thought_signature to extra_content following Gemini's OpenAI compatibility format
+				if len(p.ThoughtSignature) > 0 {
+					toolCallMap["extra_content"] = map[string]interface{}{
+						"google": GoogleExtraContent{
+							ThoughtSignature: p.ThoughtSignature,
+						},
+					}
+					utils.L().Infow("Preserved thought_signature in extra_content (stream)",
+						"tool_call_id", toolCallID,
+						"signature_length", len(p.ThoughtSignature))
 				}
 
 				// For streaming, we need to set the index
 				idx := i
-				toolCall.Index = &idx
+				toolCallMap["index"] = idx
+
+				// Marshal to JSON and unmarshal to openai.ToolCall
+				// Note: For streaming, we use the standard openai.ToolCall type
+				toolCallJSON, _ := json.Marshal(toolCallMap)
+				var toolCall openai.ToolCall
+				if err := json.Unmarshal(toolCallJSON, &toolCall); err != nil {
+					utils.L().Errorw("Failed to unmarshal tool call in stream",
+						"error", err,
+						"tool_call_map", toolCallMap)
+					// Fallback to basic tool call
+					toolCall = openai.ToolCall{
+						ID:    toolCallID,
+						Type:  openai.ToolTypeFunction,
+						Index: &idx,
+						Function: openai.FunctionCall{
+							Name:      p.FunctionCall.Name,
+							Arguments: string(argsJSON),
+						},
+					}
+				}
 
 				toolCalls = append(toolCalls, toolCall)
 			}

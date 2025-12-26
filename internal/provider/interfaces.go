@@ -41,7 +41,8 @@ type Provider interface {
 	Name() string
 
 	// ChatCompletion handles a single chat request
-	ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error)
+	// Returns interface{} to allow providers to return custom response types (e.g., with extra_content)
+	ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error)
 
 	// StreamChatCompletion handles a streaming chat request
 	// It returns a channel that emits chunks.

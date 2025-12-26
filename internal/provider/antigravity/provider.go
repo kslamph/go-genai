@@ -13,8 +13,6 @@ import (
 	cloudauth "cloud.google.com/go/auth"
 	"github.com/sashabaranov/go-openai"
 	"github.com/sunbankio/omniproxy/auth"
-	"github.com/sunbankio/omniproxy/internal/provider"
-	"github.com/sunbankio/omniproxy/internal/provider/gemini"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 	"google.golang.org/genai"
 )
@@ -32,9 +30,9 @@ type AntigravityProvider struct {
 	geminiAuth *auth.GeminiAuthenticator
 }
 
-// Ensure AntigravityProvider implements provider.Provider
-var _ provider.Provider = (*AntigravityProvider)(nil)
-
+// NewProvider creates a new Antigravity provider with auth
+// Note: This provider is NOT available for OpenAI-compatible API requests.
+// It's kept for future native protocol implementation.
 func NewProvider(ctx context.Context, name string, auth *Authenticator) (*AntigravityProvider, error) {
 	// 1. Discover Project ID
 	projectID, err := discoverProjectID(ctx, auth, AntigravityBaseURL)
@@ -69,6 +67,8 @@ func NewProvider(ctx context.Context, name string, auth *Authenticator) (*Antigr
 }
 
 // NewProviderWithGeminiAuth creates a new Antigravity provider using auth.GeminiAuthenticator (like POC)
+// Note: This provider is NOT available for OpenAI-compatible API requests.
+// It's kept for future native protocol implementation.
 func NewProviderWithGeminiAuth(ctx context.Context, name string, geminiAuth *auth.GeminiAuthenticator) (*AntigravityProvider, error) {
 	// 1. Check if project ID is already stored in credentials
 	projectID := geminiAuth.GetProjectID()
@@ -162,48 +162,19 @@ func (p *AntigravityProvider) Name() string {
 	return p.name
 }
 
-func (p *AntigravityProvider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (*openai.ChatCompletionResponse, error) {
-	sys, contents, config, err := gemini.ToGeminiRequest(req)
-	if err != nil {
-		utils.L().Errorw("Failed to convert request to Gemini format",
-			"provider", p.name,
-			"error", err)
-		return nil, err
-	}
+// GetClient returns the underlying genai.Client for native protocol access
+func (p *AntigravityProvider) GetClient() *genai.Client {
+	return p.client
+}
 
-	if sys != nil {
-		config.SystemInstruction = sys
-	}
+// GetAuth returns the authenticator for native protocol access
+func (p *AntigravityProvider) GetAuth() *Authenticator {
+	return p.auth
+}
 
-	utils.L().Infow("Calling GenerateContent",
-		"provider", p.name,
-		"model", req.Model,
-		"num_contents", len(contents),
-		"has_system", sys != nil,
-		"project_id", p.getProjectID(),
-		"base_url", AntigravityBaseURL,
-		"temperature", config.Temperature,
-		"max_tokens", config.MaxOutputTokens)
-
-	// Debug: Print full request details
-	utils.L().Debugw("Full request details",
-		"provider", p.name,
-		"original_model", req.Model,
-		"num_messages", len(req.Messages),
-		"stream", req.Stream)
-
-	resp, err := p.client.Models.GenerateContent(ctx, req.Model, contents, config)
-	if err != nil {
-		utils.L().Errorw("GenerateContent failed",
-			"provider", p.name,
-			"model", req.Model,
-			"project_id", p.getProjectID(),
-			"error", err,
-			"error_type", fmt.Sprintf("%T", err))
-		return nil, p.wrapError(err)
-	}
-
-	return gemini.FromGeminiResponse(resp, req.Model), nil
+// GetGeminiAuth returns the GeminiAuthenticator for native protocol access
+func (p *AntigravityProvider) GetGeminiAuth() *auth.GeminiAuthenticator {
+	return p.geminiAuth
 }
 
 // getProjectID returns the project ID for this provider (for debugging)
@@ -214,80 +185,7 @@ func (p *AntigravityProvider) getProjectID() string {
 	return "unknown"
 }
 
-func (p *AntigravityProvider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error) {
-	respChan := make(chan openai.ChatCompletionStreamResponse)
-	errChan := make(chan error, 1)
-
-	sys, contents, config, err := gemini.ToGeminiRequest(req)
-	if err != nil {
-		errChan <- p.wrapError(err)
-		close(respChan)
-		close(errChan)
-		return respChan, errChan
-	}
-
-	if sys != nil {
-		config.SystemInstruction = sys
-	}
-
-	go func() {
-		defer close(respChan)
-		defer close(errChan)
-
-		iter := p.client.Models.GenerateContentStream(ctx, req.Model, contents, config)
-		for resp, err := range iter {
-			if err != nil {
-				errChan <- p.wrapError(err)
-				return
-			}
-
-			chunk := gemini.FromGeminiChunk(resp, req.Model)
-			respChan <- *chunk
-		}
-	}()
-
-	return respChan, errChan
-}
-
-// wrapError converts genai errors to ProviderError with proper status codes
-func (p *AntigravityProvider) wrapError(err error) error {
-	errStr := err.Error()
-
-	// Parse genai error format: "Error 429, Message: ..., Status: RESOURCE_EXHAUSTED, Details: [...]"
-	statusCode := http.StatusInternalServerError
-	message := errStr
-	var details interface{}
-
-	// Extract status code
-	if idx := strings.Index(errStr, "Error "); idx >= 0 {
-		var code int
-		if _, scanErr := fmt.Sscanf(errStr[idx:], "Error %d", &code); scanErr == nil {
-			statusCode = code
-		}
-	}
-
-	// Extract message
-	if idx := strings.Index(errStr, "Message: "); idx >= 0 {
-		endIdx := strings.Index(errStr[idx:], ", Status:")
-		if endIdx > 0 {
-			message = errStr[idx+9 : idx+endIdx]
-		}
-	}
-
-	// Extract status and details for additional context
-	if idx := strings.Index(errStr, "Status: "); idx >= 0 {
-		detailsIdx := strings.Index(errStr[idx:], "Details:")
-		if detailsIdx > 0 {
-			details = map[string]string{
-				"status":  errStr[idx+8 : idx+detailsIdx-2],
-				"details": errStr[idx+detailsIdx:],
-			}
-		}
-	}
-
-	return provider.NewProviderError(statusCode, message, p.name, details)
-}
-
+// ListModels returns a list of models supported by the provider
 func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) {
 	fallbackModels := []string{
 		"gemini-2.5-computer-use-preview-10-2025",
@@ -362,6 +260,7 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 	return fallbackModels, nil
 }
 
+// SupportsModel checks if the provider supports the given model
 func (p *AntigravityProvider) SupportsModel(model string) bool {
 	supportedModels, err := p.ListModels(context.Background())
 	if err != nil {
@@ -374,6 +273,21 @@ func (p *AntigravityProvider) SupportsModel(model string) bool {
 		}
 	}
 	return false
+}
+
+// ChatCompletion is not supported for OpenAI-compatible API
+// This provider is kept for future native protocol implementation
+func (p *AntigravityProvider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error) {
+	return nil, fmt.Errorf("provider 'antigravity' does not support OpenAI-compatible API. Use native protocol access instead")
+}
+
+// StreamChatCompletion is not supported for OpenAI-compatible API
+// This provider is kept for future native protocol implementation
+func (p *AntigravityProvider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error) {
+	errChan := make(chan error, 1)
+	errChan <- fmt.Errorf("provider 'antigravity' does not support OpenAI-compatible API. Use native protocol access instead")
+	close(errChan)
+	return make(chan openai.ChatCompletionStreamResponse), errChan
 }
 
 // geminiTokenProvider adapts auth.GeminiAuthenticator to cloudauth.TokenProvider (like POC)
