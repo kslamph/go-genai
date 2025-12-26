@@ -16,6 +16,9 @@ func ToGeminiRequest(req openai.ChatCompletionRequest) (*genai.Content, []*genai
 	var systemInstruction *genai.Content
 	var contents []*genai.Content
 
+	// Map to track tool call IDs to function names for later reference
+	toolCallIDToFunctionName := make(map[string]string)
+
 	// Debug: Log tool information
 	if len(req.Tools) > 0 {
 		utils.L().Infow("Converting OpenAI request with tools",
@@ -94,6 +97,9 @@ func ToGeminiRequest(req openai.ChatCompletionRequest) (*genai.Content, []*genai
 						continue
 					}
 
+					// Store mapping of tool call ID to function name for later use
+					toolCallIDToFunctionName[toolCall.ID] = toolCall.Function.Name
+
 					// Parse arguments from JSON string to map
 					var args map[string]any
 					if toolCall.Function.Arguments != "" {
@@ -146,16 +152,25 @@ func ToGeminiRequest(req openai.ChatCompletionRequest) (*genai.Content, []*genai
 				response = map[string]any{}
 			}
 
-			utils.L().Debugw("Tool response parsed",
+			// Look up the function name from our mapping
+			functionName, found := toolCallIDToFunctionName[msg.ToolCallID]
+			if !found {
+				utils.L().Errorw("Tool call ID not found in mapping",
+					"tool_call_id", msg.ToolCallID,
+					"available_ids", toolCallIDToFunctionName)
+				return nil, nil, nil, fmt.Errorf("tool call ID %s not found in previous tool calls", msg.ToolCallID)
+			}
+
+			utils.L().Debugw("Found function name for tool response",
 				"tool_call_id", msg.ToolCallID,
-				"response", response)
+				"function_name", functionName)
 
 			contents = append(contents, &genai.Content{
 				Role: "user", // Tool responses come from user in Gemini
 				Parts: []*genai.Part{{
 					FunctionResponse: &genai.FunctionResponse{
 						ID:       msg.ToolCallID,
-						Name:     msg.Name, // Function name from OpenAI message
+						Name:     functionName, // Use the looked-up function name
 						Response: response,
 					},
 				}},
