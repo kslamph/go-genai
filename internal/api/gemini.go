@@ -1,14 +1,15 @@
 package api
 
 import (
-        "bytes"
-        "encoding/json"
-        "fmt"
-        "io"
-        "net/http"
-        "os"
-        "strings"
-        "time"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/sunbankio/omniproxy/pkg/utils"
@@ -24,6 +25,29 @@ type GeminiRequest struct {
 	SystemInstruction *genai.Content               `json:"systemInstruction,omitempty"`
 	GenerationConfig  *genai.GenerateContentConfig `json:"generationConfig,omitempty"`
 	CachedContent     string                       `json:"cachedContent,omitempty"`
+}
+
+// fixThoughtSignatures recursively finds "thoughtSignature" fields in a map and
+// base64 encodes them if they are strings. This is needed because some clients
+// send plain strings, but the genai SDK expects []byte (which Go's JSON decoder
+// strictly decodes as base64).
+func fixThoughtSignatures(data any) {
+	switch v := data.(type) {
+	case map[string]any:
+		for k, val := range v {
+			if k == "thoughtSignature" {
+				if str, ok := val.(string); ok {
+					v[k] = base64.StdEncoding.EncodeToString([]byte(str))
+				}
+			} else {
+				fixThoughtSignatures(val)
+			}
+		}
+	case []any:
+		for _, item := range v {
+			fixThoughtSignatures(item)
+		}
+	}
 }
 
 // toGenAIConfig converts the request to the SDK's GenerateContentConfig
@@ -121,18 +145,29 @@ func (s *Server) HandleGeminiGenerateContent(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Read body for debug dumping
+	// Read body for pre-processing and debug dumping
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		utils.L().Errorf("Failed to read request body: %v", err)
 		http.Error(w, "failed to read request body", http.StatusInternalServerError)
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	// Parse request body
+	// Pre-process JSON to handle thoughtSignature type mismatch
+	var raw map[string]any
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		s.dumpRequestIfDebug(r, bodyBytes, nil)
+		utils.L().Errorf("Failed to unmarshal raw Gemini request: %v", err)
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	fixThoughtSignatures(raw)
+	processedBytes, _ := json.Marshal(raw)
+
+	// Parse processed request body
 	var req GeminiRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(processedBytes, &req); err != nil {
+		s.dumpRequestIfDebug(r, bodyBytes, nil)
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -174,6 +209,7 @@ func (s *Server) HandleGeminiGenerateContent(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/json")
 	// Clean the response to remove internal SDK metadata
 	cleanResp := cleanGeminiResponse(resp)
+	s.dumpResponseIfDebug(r, cleanResp)
 	if err := json.NewEncoder(w).Encode(cleanResp); err != nil {
 		utils.L().Errorf("Failed to encode Gemini response: %v", err)
 	}
@@ -199,18 +235,29 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Read body for debug dumping
+	// Read body for pre-processing and debug dumping
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		utils.L().Errorf("Failed to read request body: %v", err)
 		http.Error(w, "failed to read request body", http.StatusInternalServerError)
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	// Parse request body
+	// Pre-process JSON to handle thoughtSignature type mismatch
+	var raw map[string]any
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		s.dumpRequestIfDebug(r, bodyBytes, nil)
+		utils.L().Errorf("Failed to unmarshal raw Gemini request: %v", err)
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	fixThoughtSignatures(raw)
+	processedBytes, _ := json.Marshal(raw)
+
+	// Parse processed request body
 	var req GeminiRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(processedBytes, &req); err != nil {
+		s.dumpRequestIfDebug(r, bodyBytes, nil)
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -259,6 +306,7 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 			errorObj, _ := json.Marshal(map[string]any{
 				"error": map[string]any{"message": err.Error(), "code": 500},
 			})
+			s.dumpResponseIfDebug(r, map[string]any{"stream_error": err.Error()})
 			fmt.Fprintf(w, "data: %s\n\n", string(errorObj))
 			flusher.Flush()
 			break
@@ -271,6 +319,7 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 
 		// Clean the response
 		cleanResp := cleanGeminiStreamResponse(resp)
+		s.dumpResponseIfDebug(r, cleanResp)
 		
 		data, err := json.Marshal(cleanResp)
 		if err != nil {
@@ -386,18 +435,29 @@ func (s *Server) HandleGeminiModelsAll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleGeminiGenerateContentAll(w http.ResponseWriter, r *http.Request) {
 	modelName := chi.URLParam(r, "model")
 
-	// Read body for debug dumping
+	// Read body for pre-processing and debug dumping
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		utils.L().Errorf("Failed to read request body: %v", err)
 		http.Error(w, "failed to read request body", http.StatusInternalServerError)
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	// Parse request body
+	// Pre-process JSON to handle thoughtSignature type mismatch
+	var raw map[string]any
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		s.dumpRequestIfDebug(r, bodyBytes, nil)
+		utils.L().Errorf("Failed to unmarshal raw Gemini request: %v", err)
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	fixThoughtSignatures(raw)
+	processedBytes, _ := json.Marshal(raw)
+
+	// Parse processed request body
 	var req GeminiRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(processedBytes, &req); err != nil {
+		s.dumpRequestIfDebug(r, bodyBytes, nil)
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -447,6 +507,7 @@ func (s *Server) HandleGeminiGenerateContentAll(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Type", "application/json")
 	// Clean the response to remove internal SDK metadata
 	cleanResp := cleanGeminiResponse(resp)
+	s.dumpResponseIfDebug(r, cleanResp)
 	if err := json.NewEncoder(w).Encode(cleanResp); err != nil {
 		utils.L().Errorf("Failed to encode Gemini response: %v", err)
 	}
@@ -456,18 +517,29 @@ func (s *Server) HandleGeminiGenerateContentAll(w http.ResponseWriter, r *http.R
 func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *http.Request) {
 	modelName := chi.URLParam(r, "model")
 
-	// Read body for debug dumping
+	// Read body for pre-processing and debug dumping
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		utils.L().Errorf("Failed to read request body: %v", err)
 		http.Error(w, "failed to read request body", http.StatusInternalServerError)
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	// Parse request body
+	// Pre-process JSON to handle thoughtSignature type mismatch
+	var raw map[string]any
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		s.dumpRequestIfDebug(r, bodyBytes, nil)
+		utils.L().Errorf("Failed to unmarshal raw Gemini request: %v", err)
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	fixThoughtSignatures(raw)
+	processedBytes, _ := json.Marshal(raw)
+
+	// Parse processed request body
 	var req GeminiRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(processedBytes, &req); err != nil {
+		s.dumpRequestIfDebug(r, bodyBytes, nil)
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -524,6 +596,7 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 			errorObj, _ := json.Marshal(map[string]any{
 				"error": map[string]any{"message": err.Error(), "code": 500},
 			})
+			s.dumpResponseIfDebug(r, map[string]any{"stream_error": err.Error()})
 			fmt.Fprintf(w, "data: %s\n\n", string(errorObj))
 			flusher.Flush()
 			break
@@ -537,6 +610,7 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 
 		// Clean the response to remove internal SDK metadata
 		cleanResp := cleanGeminiStreamResponse(resp)
+		s.dumpResponseIfDebug(r, cleanResp)
 		
 		data, err := json.Marshal(cleanResp)
 		if err != nil {
@@ -554,37 +628,55 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 	utils.L().Infow("Gemini stream completed (all providers)", "model", modelName, "total_chunks", chunkCount, "provider", p.Name())
 }
 
+func (s *Server) getDebugDumpPath(r *http.Request) string {
+	reqID := middleware.GetReqID(r.Context())
+	if reqID == "" {
+		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	safeReqID := strings.ReplaceAll(reqID, "/", "_")
+	return fmt.Sprintf("debug_dumps/gemini_req_%s.log", safeReqID)
+}
+
 func (s *Server) dumpRequestIfDebug(r *http.Request, reqBody []byte, genConfig any) {
 	if !utils.IsDebugMode() {
 		return
 	}
 
-	        reqID := middleware.GetReqID(r.Context())
-	        if reqID == "" {
-	                reqID = fmt.Sprintf("%d", time.Now().UnixNano())
-	        }
-	        
-	        // Sanitize reqID for filename
-	        safeReqID := strings.ReplaceAll(reqID, "/", "_")
+	_ = os.MkdirAll("debug_dumps", 0755)
+	filename := s.getDebugDumpPath(r)
 	
-	        // Create debug_dumps directory if not exists
-	        if err := os.MkdirAll("debug_dumps", 0755); err != nil {
-	                utils.L().Errorf("Failed to create debug_dumps directory: %v", err)
-	                return
-	        }
-	
-	                filename := fmt.Sprintf("debug_dumps/gemini_req_%s.log", safeReqID)
-	
-	                f, err := os.Create(filename)
-	
-	                if err != nil {
-		utils.L().Errorf("Failed to create debug dump file: %v", err)
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		utils.L().Errorf("Failed to open debug dump file: %v", err)
 		return
 	}
 	defer f.Close()
 
-	fmt.Fprintf(f, "=== Raw Request Body ===\n%s\n\n", string(reqBody))
+	fmt.Fprintf(f, "=== [%s] Raw Request Body ===\n%s\n\n", time.Now().Format(time.RFC3339), string(reqBody))
 
-	configBytes, _ := json.MarshalIndent(genConfig, "", "  ")
-	fmt.Fprintf(f, "=== Parsed GenerationConfig ===\n%s\n", string(configBytes))
+	if genConfig != nil {
+		configBytes, _ := json.MarshalIndent(genConfig, "", "  ")
+		fmt.Fprintf(f, "=== Parsed GenerationConfig ===\n%s\n\n", string(configBytes))
+	} else {
+		fmt.Fprintf(f, "=== Parsed GenerationConfig ===\n(parsing failed or not available)\n\n")
+	}
+}
+
+func (s *Server) dumpResponseIfDebug(r *http.Request, resp any) {
+	if !utils.IsDebugMode() {
+		return
+	}
+
+	_ = os.MkdirAll("debug_dumps", 0755)
+	filename := s.getDebugDumpPath(r)
+	
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		utils.L().Errorf("Failed to open debug dump file for response: %v", err)
+		return
+	}
+	defer f.Close()
+
+	respBytes, _ := json.MarshalIndent(resp, "", "  ")
+	fmt.Fprintf(f, "--- [%s] Outgoing Response Chunk ---\n%s\n\n", time.Now().Format(time.RFC3339), string(respBytes))
 }
