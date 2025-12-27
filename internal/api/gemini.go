@@ -343,17 +343,52 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 func (s *Server) writeGeminiErrorResponse(w http.ResponseWriter, err error) {
 	statusCode := http.StatusInternalServerError
 	message := err.Error()
+	status := "" // Default to empty, will try to extract from error
 
-	// Try to extract status code from error string if it's in genai error format
+	// Try to extract status code and status string from error string if it's in genai error format
+	// The genai SDK error format is typically: "googleapi: Error [CODE]: [MESSAGE] [STATUS]"
 	errStr := err.Error()
 	if idx := indexOf(errStr, "Error "); idx >= 0 {
 		var code int
-		if _, scanErr := fmt.Sscanf(errStr[idx:], "Error %d", &code); scanErr == nil {
+		var extractedStatus string
+		// Look for the pattern: "Error [CODE]: [MESSAGE] [STATUS]"
+		// Example: "googleapi: Error 400: Request contains an invalid argument., INVALID_ARGUMENT"
+		n, scanErr := fmt.Sscanf(errStr[idx:], "Error %d: %s %s", &code, &message, &extractedStatus)
+		if scanErr == nil && n == 3 {
 			statusCode = code
+			// The message might have been captured with the status, so we need to clean it up
+			// Find the status part in the message and remove it
+			if lastIdx := indexOf(message, extractedStatus); lastIdx > 0 {
+				message = strings.TrimSpace(message[:lastIdx])
+			}
+			status = extractedStatus
+		} else {
+			// If the 3-part scan failed, try to get just the code and message
+			n2, scanErr2 := fmt.Sscanf(errStr[idx:], "Error %d: %s", &code, &message)
+			if scanErr2 == nil && n2 >= 1 {
+				statusCode = code
+				// If we only got the code and message, leave status as empty or try to infer
+				// For now, we'll leave it empty as per the request to use exactly what the endpoint gives
+			}
 		}
 	}
 
-	utils.L().Warnf("Writing Gemini error response: status=%d, message=%s", statusCode, message)
+	// If status is still empty, try to infer from the message or leave it empty
+	if status == "" {
+		// Attempt to extract status from the end of the error message
+		// Common statuses: INVALID_ARGUMENT, PERMISSION_DENIED, NOT_FOUND, etc.
+		parts := strings.Split(errStr, " ")
+		for i := len(parts) - 1; i >= 0; i-- {
+			part := strings.TrimRight(parts[i], ".:,;!")
+			// Check if this part looks like a status string (uppercase with underscores)
+			if part != "" && part == strings.ToUpper(part) && strings.Contains(part, "_") {
+				status = part
+				break
+			}
+		}
+	}
+
+	utils.L().Warnf("Writing Gemini error response: status=%d, message=%s, status_string=%s", statusCode, message, status)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
@@ -363,6 +398,11 @@ func (s *Server) writeGeminiErrorResponse(w http.ResponseWriter, err error) {
 			"message": message,
 			"code":    statusCode,
 		},
+	}
+
+	// Only add the status field if it was successfully extracted
+	if status != "" {
+		errorResp["error"].(map[string]interface{})["status"] = status
 	}
 
 	if err := json.NewEncoder(w).Encode(errorResp); err != nil {
