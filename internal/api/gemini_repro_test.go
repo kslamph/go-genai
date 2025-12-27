@@ -1,31 +1,11 @@
 package api
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 )
-
-func fixThoughtSignatures(data any) {
-	switch v := data.(type) {
-	case map[string]any:
-		for k, val := range v {
-			if k == "thoughtSignature" {
-				if str, ok := val.(string); ok {
-					v[k] = base64.StdEncoding.EncodeToString([]byte(str))
-				}
-			} else {
-				fixThoughtSignatures(val)
-			}
-		}
-	case []any:
-		for _, item := range v {
-			fixThoughtSignatures(item)
-		}
-	}
-}
 
 func TestReproduceAndFixDecodeError(t *testing.T) {
 	content, err := os.ReadFile("../../debug_dumps/gemini_req_pws_oNFsFhULCy-000002.log")
@@ -64,4 +44,3 @@ func TestReproduceAndFixDecodeError(t *testing.T) {
 	}
 	t.Log("Unmarshal with fix successful")
 }
-
