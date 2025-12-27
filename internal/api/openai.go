@@ -199,6 +199,12 @@ func (s *Server) executeChat(w http.ResponseWriter, r *http.Request, p provider.
 }
 
 func (s *Server) normalChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {
+	utils.L().Infow("Sending request to provider",
+		"provider", p.Name(),
+		"provider_type", p.Type(),
+		"model", req.Model,
+		"stream", false)
+
 	resp, err := p.ChatCompletion(r.Context(), req)
 	if err != nil {
 		utils.L().Errorf("Provider %s failed: %v", p.Name(), err)
@@ -260,6 +266,12 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {
+	utils.L().Infow("Sending request to provider",
+		"provider", p.Name(),
+		"provider_type", p.Type(),
+		"model", req.Model,
+		"stream", true)
+
 	respChan, errChan := p.StreamChatCompletion(r.Context(), req)
 
 	w.Header().Set("Content-Type", "text/event-stream")

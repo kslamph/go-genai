@@ -41,7 +41,10 @@ type PoolManager struct {
 	// lastUsedIndex tracks the last used index for round-robin per provider type
 	lastUsedIndex map[string]int
 
-	// mu protects lastSuccess, failureCount, and lastUsedIndex
+	// rateLimitRejectTime maps "providerName:model" to the timestamp when it was last rejected due to 429
+	rateLimitRejectTime map[string]time.Time
+
+	// mu protects lastSuccess, failureCount, lastUsedIndex, and rateLimitRejectTime
 	mu sync.RWMutex
 
 	// rng for random selection (fallback only)
@@ -51,13 +54,14 @@ type PoolManager struct {
 // NewPoolManager creates a new PoolManager and initializes providers
 func NewPoolManager(ctx context.Context, cfg *config.Config) (*PoolManager, error) {
 	pm := &PoolManager{
-		openaiPools:   make(map[string][]provider.OpenAICompatibleProvider),
-		geminiPools:   make(map[string][]provider.GeminiNativeProvider),
-		kiroPools:     make(map[string][]provider.KiroNativeProvider),
-		lastSuccess:   make(map[string]provider.BaseProvider),
-		failureCount:  make(map[string]int),
-		lastUsedIndex: make(map[string]int),
-		rng:           rand.New(rand.NewSource(time.Now().UnixNano())),
+		openaiPools:         make(map[string][]provider.OpenAICompatibleProvider),
+		geminiPools:         make(map[string][]provider.GeminiNativeProvider),
+		kiroPools:           make(map[string][]provider.KiroNativeProvider),
+		lastSuccess:         make(map[string]provider.BaseProvider),
+		failureCount:        make(map[string]int),
+		lastUsedIndex:       make(map[string]int),
+		rateLimitRejectTime: make(map[string]time.Time),
+		rng:                 rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	if err := pm.initProviders(ctx, cfg); err != nil {
@@ -302,15 +306,56 @@ func (pm *PoolManager) GetOpenAIProviderByModelWithReason(model string) (provide
 	return selected, "round-robin", nil
 }
 
-// GetGeminiProvider returns a Gemini-native provider for the given type
-func (pm *PoolManager) GetGeminiProvider(providerType string) (provider.GeminiNativeProvider, error) {
+// GetGeminiProvider returns a Gemini-native provider for the given type and model
+func (pm *PoolManager) GetGeminiProvider(providerType string, model string) (provider.GeminiNativeProvider, error) {
 	pool, ok := pm.geminiPools[providerType]
 	if !ok || len(pool) == 0 {
 		return nil, fmt.Errorf("no Gemini-native providers available for type: %s", providerType)
 	}
 
-	// For now, return the first provider. Could add load balancing later.
-	return pool[0], nil
+	// Select provider based on rate limit rejection time
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	// Build list of candidates with their last rejection time
+	type candidate struct {
+		provider      provider.GeminiNativeProvider
+		lastReject    time.Time
+	}
+	
+	var candidates []candidate
+	for _, p := range pool {
+		key := p.Name() + ":" + model
+		lastReject := pm.rateLimitRejectTime[key]
+		candidates = append(candidates, candidate{
+			provider:   p,
+			lastReject: lastReject,
+		})
+	}
+
+	// Select the provider with the oldest rejection time (or zero if never rejected)
+	selected := candidates[0].provider
+	oldestReject := candidates[0].lastReject
+
+	for _, c := range candidates[1:] {
+		if c.lastReject.Before(oldestReject) {
+			oldestReject = c.lastReject
+			selected = c.provider
+		} else if c.lastReject.Equal(oldestReject) {
+			// If multiple providers have the same rejection time, randomly select one
+			if pm.rng.Intn(2) == 0 {
+				selected = c.provider
+			}
+		}
+	}
+
+	utils.L().Debugw("Selected Gemini provider based on rate limit rejection time",
+		"provider_type", providerType,
+		"model", model,
+		"selected_provider", selected.Name(),
+		"last_reject", oldestReject.Format(time.RFC3339))
+
+	return selected, nil
 }
 
 // GetKiroProvider returns a Kiro-native provider for the given type
@@ -337,6 +382,18 @@ func (pm *PoolManager) RecordFailure(p provider.BaseProvider) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.failureCount[p.Name()]++
+}
+
+// RecordRateLimitReject records a 429 rate limit rejection for a specific provider-model combination
+func (pm *PoolManager) RecordRateLimitReject(providerName string, model string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	key := providerName + ":" + model
+	pm.rateLimitRejectTime[key] = time.Now()
+	utils.L().Infow("Recorded 429 rate limit rejection",
+		"provider", providerName,
+		"model", model,
+		"reject_time", pm.rateLimitRejectTime[key].Format(time.RFC3339))
 }
 
 // ListModels returns a list of all models from OpenAI-compatible providers
@@ -409,12 +466,52 @@ func (pm *PoolManager) ListGeminiModels(ctx context.Context) ([]string, error) {
 
 // GetAnyGeminiProviderByModel finds any Gemini provider that supports the given model
 func (pm *PoolManager) GetAnyGeminiProviderByModel(model string) (provider.GeminiNativeProvider, error) {
+	// Collect all providers that support this model
+	type candidate struct {
+		provider      provider.GeminiNativeProvider
+		lastReject    time.Time
+	}
+	
+	var candidates []candidate
 	for _, pool := range pm.geminiPools {
 		for _, p := range pool {
 			if p.SupportsModel(model) {
-				return p, nil
+				pm.mu.RLock()
+				key := p.Name() + ":" + model
+				lastReject := pm.rateLimitRejectTime[key]
+				pm.mu.RUnlock()
+				candidates = append(candidates, candidate{
+					provider:   p,
+					lastReject: lastReject,
+				})
 			}
 		}
 	}
-	return nil, fmt.Errorf("no Gemini-native providers found for model: %s", model)
+
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no Gemini-native providers found for model: %s", model)
+	}
+
+	// Select the provider with the oldest rejection time (or zero if never rejected)
+	selected := candidates[0].provider
+	oldestReject := candidates[0].lastReject
+
+	for _, c := range candidates[1:] {
+		if c.lastReject.Before(oldestReject) {
+			oldestReject = c.lastReject
+			selected = c.provider
+		} else if c.lastReject.Equal(oldestReject) {
+			// If multiple providers have the same rejection time, randomly select one
+			if pm.rng.Intn(2) == 0 {
+				selected = c.provider
+			}
+		}
+	}
+
+	utils.L().Debugw("Selected Gemini provider (any) based on rate limit rejection time",
+		"model", model,
+		"selected_provider", selected.Name(),
+		"last_reject", oldestReject.Format(time.RFC3339))
+
+	return selected, nil
 }

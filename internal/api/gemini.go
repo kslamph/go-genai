@@ -138,7 +138,7 @@ func (s *Server) HandleGeminiGenerateContent(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Get Gemini-native provider
-	p, err := s.pm.GetGeminiProvider(providerType)
+	p, err := s.pm.GetGeminiProvider(providerType, modelName)
 	if err != nil {
 		utils.L().Errorf("Failed to get Gemini provider %s: %v", providerType, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -195,9 +195,25 @@ func (s *Server) HandleGeminiGenerateContent(w http.ResponseWriter, r *http.Requ
 		"has_cached_content", finalConfig.CachedContent != "")
 
 	client := p.GetClient()
+	utils.L().Infow("Sending request to provider",
+		"provider", p.Name(),
+		"provider_type", providerType,
+		"model", modelName,
+		"stream", false)
+
 	resp, err := client.Models.GenerateContent(r.Context(), modelName, req.Contents, finalConfig)
 	if err != nil {
-		utils.L().Errorf("Gemini provider %s failed: %v", p.Name(), err)
+		errStr := err.Error()
+		// Check if this is a 429 rate limit error
+		if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
+			s.pm.RecordRateLimitReject(p.Name(), modelName)
+			utils.L().Errorf("Gemini provider %s failed: 429 rate limit exceeded - recording rejection",
+				"provider", p.Name(),
+				"model", modelName,
+				"error", err)
+		} else {
+			utils.L().Errorf("Gemini provider %s failed: %v", p.Name(), err)
+		}
 		s.writeGeminiErrorResponse(w, err)
 		return
 	}
@@ -228,7 +244,7 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 	}
 
 	// Get Gemini-native provider
-	p, err := s.pm.GetGeminiProvider(providerType)
+	p, err := s.pm.GetGeminiProvider(providerType, modelName)
 	if err != nil {
 		utils.L().Errorf("Failed to get Gemini provider %s: %v", providerType, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -292,6 +308,12 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 		return
 	}
 
+	utils.L().Infow("Sending request to provider",
+		"provider", p.Name(),
+		"provider_type", providerType,
+		"model", modelName,
+		"stream", true)
+
 	iter := client.Models.GenerateContentStream(r.Context(), modelName, req.Contents, finalConfig)
 
 	utils.L().Infow("Starting Gemini stream (SSE)", "provider", providerType, "model", modelName, "contents_count", len(req.Contents))
@@ -301,7 +323,17 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 	for resp, err := range iter {
 		// Handle stream-level error (occurs mid-stream)
 		if err != nil {
-			utils.L().Errorf("Gemini stream error: %v", err)
+			errStr := err.Error()
+			// Check if this is a 429 rate limit error
+			if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
+				s.pm.RecordRateLimitReject(p.Name(), modelName)
+				utils.L().Errorf("Gemini stream error: 429 rate limit exceeded - recording rejection",
+					"provider", p.Name(),
+					"model", modelName,
+					"error", err)
+			} else {
+				utils.L().Errorf("Gemini stream error: %v", err)
+			}
 			// Try to send error event
 			errorObj, _ := json.Marshal(map[string]any{
 				"error": map[string]any{"message": err.Error(), "code": 500},
@@ -533,9 +565,25 @@ func (s *Server) HandleGeminiGenerateContentAll(w http.ResponseWriter, r *http.R
 	}
 
 	client := p.GetClient()
+	utils.L().Infow("Sending request to provider",
+		"provider", p.Name(),
+		"provider_type", "all-gemini",
+		"model", modelName,
+		"stream", false)
+
 	resp, err := client.Models.GenerateContent(r.Context(), modelName, req.Contents, finalConfig)
 	if err != nil {
-		utils.L().Errorf("Gemini provider %s failed: %v", p.Name(), err)
+		errStr := err.Error()
+		// Check if this is a 429 rate limit error
+		if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
+			s.pm.RecordRateLimitReject(p.Name(), modelName)
+			utils.L().Errorf("Gemini provider %s failed: 429 rate limit exceeded - recording rejection",
+				"provider", p.Name(),
+				"model", modelName,
+				"error", err)
+		} else {
+			utils.L().Errorf("Gemini provider %s failed: %v", p.Name(), err)
+		}
 		s.writeGeminiErrorResponse(w, err)
 		return
 	}
@@ -558,12 +606,14 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 	modelName := chi.URLParam(r, "model")
 
 	// Read body for pre-processing and debug dumping
+	utils.L().Debugw("Starting to read request body", "model", modelName)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		utils.L().Errorf("Failed to read request body: %v", err)
 		http.Error(w, "failed to read request body", http.StatusInternalServerError)
 		return
 	}
+	utils.L().Debugw("Finished reading request body", "model", modelName, "body_size", len(bodyBytes))
 
 	// Pre-process JSON to handle thoughtSignature type mismatch
 	var raw map[string]any
@@ -584,6 +634,7 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	utils.L().Debugw("Finished parsing request", "model", modelName, "contents_count", len(req.Contents))
 
 	// Construct final GenerationConfig
 	finalConfig := req.toGenAIConfig()
@@ -608,6 +659,7 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	utils.L().Debugw("Got provider, about to send request", "model", modelName, "provider", p.Name())
 
 	client := p.GetClient()
 
@@ -623,6 +675,12 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 		return
 	}
 
+	utils.L().Infow("Sending request to provider",
+		"provider", p.Name(),
+		"provider_type", "all-gemini",
+		"model", modelName,
+		"stream", true)
+
 	iter := client.Models.GenerateContentStream(r.Context(), modelName, req.Contents, finalConfig)
 
 	utils.L().Infow("Starting Gemini stream (all providers) (SSE)", "model", modelName, "contents_count", len(req.Contents), "provider", p.Name())
@@ -631,7 +689,17 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 
 	for resp, err := range iter {
 		if err != nil {
-			utils.L().Errorf("Gemini stream error mid-way: %v", err)
+			errStr := err.Error()
+			// Check if this is a 429 rate limit error
+			if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
+				s.pm.RecordRateLimitReject(p.Name(), modelName)
+				utils.L().Errorf("Gemini stream error mid-way: 429 rate limit exceeded - recording rejection",
+					"provider", p.Name(),
+					"model", modelName,
+					"error", err)
+			} else {
+				utils.L().Errorf("Gemini stream error mid-way: %v", err)
+			}
 			// Mid-stream error handling
 			errorObj, _ := json.Marshal(map[string]any{
 				"error": map[string]any{"message": err.Error(), "code": 500},

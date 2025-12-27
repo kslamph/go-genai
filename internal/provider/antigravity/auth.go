@@ -59,6 +59,7 @@ type Authenticator struct {
 	config      *OAuthConfig
 	credentials *Credentials
 	mu          sync.RWMutex
+	isValid     bool // Tracks if the credentials are still valid (not revoked)
 
 	httpClient *http.Client
 }
@@ -69,9 +70,9 @@ func NewAuthenticator(config *OAuthConfig) *Authenticator {
 		config = DefaultOAuthConfig()
 	}
 	return &Authenticator{
-		config: config,
-
+		config:     config,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
+		isValid:    true,
 	}
 }
 
@@ -99,6 +100,11 @@ func (a *Authenticator) IsAuthenticated() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
+	// Check if the authenticator is marked as invalid (e.g., due to 401 on refresh)
+	if !a.isValid {
+		return false
+	}
+
 	if a.credentials == nil {
 		creds, err := a.loadCredentials()
 		if err != nil {
@@ -113,6 +119,13 @@ func (a *Authenticator) IsAuthenticated() bool {
 
 	buffer := time.Duration(TokenRefreshBufferMs) * time.Millisecond
 	return a.credentials != nil && time.Unix(a.credentials.ExpiryDate, 0).After(time.Now().Add(buffer))
+}
+
+// IsValid returns whether this authenticator is still valid (not revoked)
+func (a *Authenticator) IsValid() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.isValid
 }
 
 func (a *Authenticator) loadCredentials() (*Credentials, error) {
@@ -153,6 +166,11 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Check if the authenticator is marked as invalid (e.g., due to 401 on refresh)
+	if !a.isValid {
+		return "", fmt.Errorf("provider credentials are invalid (revoked or expired). Please re-authenticate")
+	}
+
 	if a.credentials == nil {
 		creds, err := a.loadCredentials()
 		if err != nil {
@@ -187,6 +205,17 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	ts := conf.TokenSource(ctx, token)
 	newToken, err := ts.Token()
 	if err != nil {
+		// Check if this is a 401 error (invalid credentials)
+		errStr := err.Error()
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "unauthorized") {
+			a.isValid = false
+			utils.L().Errorw("Token refresh failed with 401 - credentials are invalid/revoked. Provider marked as invalid.",
+				"provider", "Antigravity",
+				"creds_path", a.config.CredsPath,
+				"error", err)
+			return "", fmt.Errorf("credentials are invalid (401). Please re-authenticate: %w", err)
+		}
+
 		a.credentials = nil
 		return "", fmt.Errorf("failed to refresh token: %w", err)
 	}

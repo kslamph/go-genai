@@ -60,6 +60,7 @@ type Authenticator struct {
 	credentials *Credentials
 	mu          sync.RWMutex
 	httpClient  *http.Client
+	isValid     bool // Tracks if the credentials are still valid (not revoked)
 }
 
 // NewAuthenticator creates a new Gemini authenticator
@@ -70,6 +71,7 @@ func NewAuthenticator(config *OAuthConfig) *Authenticator {
 	return &Authenticator{
 		config:     config,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
+		isValid:    true,
 	}
 }
 
@@ -102,6 +104,11 @@ func (a *Authenticator) IsAuthenticated() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
+	// Check if the authenticator is marked as invalid (e.g., due to 401 on refresh)
+	if !a.isValid {
+		return false
+	}
+
 	if a.credentials == nil {
 		// Try to load from file
 		creds, err := a.loadCredentials()
@@ -118,6 +125,13 @@ func (a *Authenticator) IsAuthenticated() bool {
 	// Check if token is still valid (with 30 minute buffer)
 	buffer := time.Duration(TokenRefreshBufferMs) * time.Millisecond
 	return a.credentials != nil && time.Unix(a.credentials.ExpiryDate, 0).After(time.Now().Add(buffer))
+}
+
+// IsValid returns whether this authenticator is still valid (not revoked)
+func (a *Authenticator) IsValid() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.isValid
 }
 
 // loadCredentials loads credentials from file
@@ -163,6 +177,11 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	// Check if the authenticator is marked as invalid (e.g., due to 401 on refresh)
+	if !a.isValid {
+		return "", fmt.Errorf("provider credentials are invalid (revoked or expired). Please re-authenticate")
+	}
+
 	// Load credentials if not in memory
 	if a.credentials == nil {
 		creds, err := a.loadCredentials()
@@ -200,7 +219,8 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	// Check if we need to force refresh (if within buffer or expired)
 	if time.Until(token.Expiry) < buffer {
 		utils.L().Infow("Token expiring in less than 30m or expired, forcing refresh",
-			"provider", "Gemini")
+			"provider", "Gemini",
+			"creds_path", a.config.CredsPath)
 		// Trick ReuseTokenSource by making the token look expired
 		token.Expiry = time.Now().Add(-1 * time.Second)
 	}
@@ -211,8 +231,20 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	// Get token (this will refresh if needed/forced)
 	newToken, err := ts.Token()
 	if err != nil {
+		// Check if this is a 401 error (invalid credentials)
+		errStr := err.Error()
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "unauthorized") {
+			a.isValid = false
+			utils.L().Errorw("Token refresh failed with 401 - credentials are invalid/revoked. Provider marked as invalid.",
+				"provider", "Gemini",
+				"creds_path", a.config.CredsPath,
+				"error", err)
+			return "", fmt.Errorf("credentials are invalid (401). Please re-authenticate: %w", err)
+		}
+
 		utils.L().Errorw("Token refresh failed",
 			"provider", "Gemini",
+			"creds_path", a.config.CredsPath,
 			"error", err)
 		// Clear creds on failure so we retry/reload next time
 		a.credentials = nil
@@ -222,7 +254,8 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	// Check if token changed or was refreshed
 	if newToken.AccessToken != a.credentials.AccessToken || newToken.RefreshToken != a.credentials.RefreshToken {
 		utils.L().Infow("Token refreshed successfully, saving credentials",
-			"provider", "Gemini")
+			"provider", "Gemini",
+			"creds_path", a.config.CredsPath)
 
 		a.credentials.AccessToken = newToken.AccessToken
 		// ReuseTokenSource ensures RefreshToken is preserved if not returned
@@ -237,6 +270,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 		if err := a.saveCredentials(a.credentials); err != nil {
 			utils.L().Errorw("Failed to save refreshed credentials",
 				"provider", "Gemini",
+				"creds_path", a.config.CredsPath,
 				"error", err)
 		}
 	}

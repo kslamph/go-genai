@@ -23,11 +23,24 @@ func NewServer(pm *manager.PoolManager) *Server {
 	return s
 }
 
+// logRequestReceived logs when a request is received
+func logRequestReceived(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		utils.L().Infow("Request received",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"remote_addr", r.RemoteAddr,
+			"user_agent", r.UserAgent())
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) setupRoutes() {
 	s.router.Use(middleware.RequestID)
 	s.router.Use(middleware.RealIP)
 	s.router.Use(middleware.Logger) // Chi's default logger
 	s.router.Use(middleware.Recoverer)
+	s.router.Use(logRequestReceived)
 
 	// OpenAI-compatible endpoints (qwen, iflow)
 	s.router.Route("/v1", func(r chi.Router) {
