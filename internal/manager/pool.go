@@ -382,3 +382,39 @@ func (pm *PoolManager) ListGeminiProviderModels(ctx context.Context, providerTyp
 
 	return pool[0].ListModels(ctx)
 }
+
+// ListGeminiModels returns a list of all models from all Gemini-native providers
+func (pm *PoolManager) ListGeminiModels(ctx context.Context) ([]string, error) {
+	uniqueModels := make(map[string]bool)
+	var models []string
+
+	for _, pool := range pm.geminiPools {
+		if len(pool) > 0 {
+			p := pool[0]
+			ms, err := p.ListModels(ctx)
+			if err != nil {
+				utils.L().Warnf("Failed to list models from Gemini provider %s: %v", p.Name(), err)
+				continue
+			}
+			for _, m := range ms {
+				if !uniqueModels[m] {
+					uniqueModels[m] = true
+					models = append(models, m)
+				}
+			}
+		}
+	}
+	return models, nil
+}
+
+// GetAnyGeminiProviderByModel finds any Gemini provider that supports the given model
+func (pm *PoolManager) GetAnyGeminiProviderByModel(model string) (provider.GeminiNativeProvider, error) {
+	for _, pool := range pm.geminiPools {
+		for _, p := range pool {
+			if p.SupportsModel(model) {
+				return p, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no Gemini-native providers found for model: %s", model)
+}

@@ -41,7 +41,7 @@ func main() {
 	client := openai.NewClientWithConfig(clientConfig)
 
 	// Test with qwen3-max model
-	model := "glm-4.6"
+	model := "glm-4.7"
 
 	// Test 1: Simple completion
 	fmt.Printf("\nTesting simple completion with model: %s\n", model)

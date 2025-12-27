@@ -23,6 +23,7 @@ func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone the request to avoid race conditions
 	newReq := req.Clone(req.Context())
 	newReq.Header.Set("Authorization", "Bearer "+token)
+	newReq.Header.Set("User-Agent", "iflow-cli/0.4.11")
 
 	transport := t.Transport
 	if transport == nil {
