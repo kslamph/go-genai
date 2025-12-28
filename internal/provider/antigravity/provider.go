@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	cloudauth "cloud.google.com/go/auth"
@@ -24,10 +25,13 @@ const (
 )
 
 type AntigravityProvider struct {
-	client     *genai.Client
-	name       string
-	auth       *Authenticator
-	geminiAuth *auth.GeminiAuthenticator
+	client       *genai.Client
+	name         string
+	auth         *Authenticator
+	geminiAuth   *auth.GeminiAuthenticator
+	cachedModels []string
+	mu           sync.RWMutex
+	modelsCached bool
 }
 
 // NewProvider creates a new Antigravity provider with auth
@@ -57,11 +61,31 @@ func NewProvider(ctx context.Context, name string, auth *Authenticator) (*Antigr
 		return nil, fmt.Errorf("failed to create genai client: %w", err)
 	}
 
-	return &AntigravityProvider{
+	provider := &AntigravityProvider{
 		client: client,
 		name:   name,
 		auth:   auth,
-	}, nil
+	}
+
+	// Fetch and cache available models at startup
+	models, err := provider.ListModels(ctx)
+	if err == nil {
+		provider.mu.Lock()
+		provider.cachedModels = models
+		provider.modelsCached = true
+		provider.mu.Unlock()
+		utils.L().Infow("Cached available models for provider at startup",
+			"provider", name,
+			"project_id", projectID,
+			"models", models)
+	} else {
+		utils.L().Warnw("Failed to fetch models for provider at startup",
+			"provider", name,
+			"project_id", projectID,
+			"error", err)
+	}
+
+	return provider, nil
 }
 
 // NewProviderWithGeminiAuth creates a new Antigravity provider using auth.GeminiAuthenticator (like POC)
@@ -125,7 +149,6 @@ func NewProviderWithGeminiAuth(ctx context.Context, name string, geminiAuth *aut
 		"provider", name,
 		"project_id", projectID)
 
-	// Log available models for this provider
 	provider := &AntigravityProvider{
 		client:     client,
 		name:       name,
@@ -133,15 +156,19 @@ func NewProviderWithGeminiAuth(ctx context.Context, name string, geminiAuth *aut
 		geminiAuth: geminiAuth,
 	}
 
-	// Fetch and log available models
+	// Fetch and cache available models at startup
 	models, err := provider.ListModels(ctx)
 	if err == nil {
-		utils.L().Infow("Available models for provider",
+		provider.mu.Lock()
+		provider.cachedModels = models
+		provider.modelsCached = true
+		provider.mu.Unlock()
+		utils.L().Infow("Cached available models for provider at startup",
 			"provider", name,
 			"project_id", projectID,
 			"models", models)
 	} else {
-		utils.L().Warnw("Failed to fetch models for provider",
+		utils.L().Warnw("Failed to fetch models for provider at startup",
 			"provider", name,
 			"project_id", projectID,
 			"error", err)
@@ -182,6 +209,21 @@ func (p *AntigravityProvider) getProjectID() string {
 }
 
 func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) {
+	p.mu.RLock()
+	if len(p.cachedModels) > 0 {
+		defer p.mu.RUnlock()
+		return p.cachedModels, nil
+	}
+	p.mu.RUnlock()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Double check after acquiring write lock
+	if len(p.cachedModels) > 0 {
+		return p.cachedModels, nil
+	}
+
 	fallbackModels := []string{
 		"gemini-2.5-computer-use-preview-10-2025",
 		"gemini-3-pro-image-preview",
@@ -202,17 +244,20 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 		token, err = p.geminiAuth.GetToken(ctx)
 	} else {
 		utils.L().Warnf("No authenticator available for Antigravity models")
+		p.cachedModels = fallbackModels
 		return fallbackModels, nil
 	}
 
 	if err != nil {
 		utils.L().Warnf("Failed to get token for Antigravity models: %v", err)
+		p.cachedModels = fallbackModels
 		return fallbackModels, nil
 	}
 
 	url := fmt.Sprintf("%s/%s:fetchAvailableModels", AntigravityBaseURL, APIVersion)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
+		p.cachedModels = fallbackModels
 		return fallbackModels, nil
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -222,6 +267,7 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		utils.L().Warnf("Error calling fetchAvailableModels: %v", err)
+		p.cachedModels = fallbackModels
 		return fallbackModels, nil
 	}
 	defer resp.Body.Close()
@@ -229,12 +275,14 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		utils.L().Warnf("fetchAvailableModels failed (%d): %s", resp.StatusCode, string(body))
+		p.cachedModels = fallbackModels
 		return fallbackModels, nil
 	}
 
 	var rawResponse map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&rawResponse); err != nil {
 		utils.L().Warnf("Failed to decode Antigravity models: %v", err)
+		p.cachedModels = fallbackModels
 		return fallbackModels, nil
 	}
 
@@ -249,19 +297,20 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 	}
 
 	if len(models) > 0 {
+		p.cachedModels = models
 		return models, nil
 	}
 
+	p.cachedModels = fallbackModels
 	return fallbackModels, nil
 }
 
 func (p *AntigravityProvider) SupportsModel(model string) bool {
-	supportedModels, err := p.ListModels(context.Background())
-	if err != nil {
-		return false
-	}
+	p.mu.RLock()
+	cached := p.cachedModels
+	p.mu.RUnlock()
 
-	for _, supported := range supportedModels {
+	for _, supported := range cached {
 		if supported == model {
 			return true
 		}
