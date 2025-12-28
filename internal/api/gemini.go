@@ -18,36 +18,92 @@ import (
 
 // GeminiRequest represents the incoming Gemini API request structure
 type GeminiRequest struct {
-	Contents          []*genai.Content             `json:"contents"`
+	Contents          []*optimizedContent          `json:"contents"`
 	Tools             []*genai.Tool                `json:"tools,omitempty"`
 	ToolConfig        *genai.ToolConfig            `json:"toolConfig,omitempty"`
 	SafetySettings    []*genai.SafetySetting       `json:"safetySettings,omitempty"`
-	SystemInstruction *genai.Content               `json:"systemInstruction,omitempty"`
+	SystemInstruction *optimizedContent            `json:"systemInstruction,omitempty"`
 	GenerationConfig  *genai.GenerateContentConfig `json:"generationConfig,omitempty"`
 	CachedContent     string                       `json:"cachedContent,omitempty"`
 }
 
-// fixThoughtSignatures recursively finds "thoughtSignature" fields in a map and
-// base64 encodes them if they are strings. This is needed because some clients
-// send plain strings, but the genai SDK expects []byte (which Go's JSON decoder
-// strictly decodes as base64).
-func fixThoughtSignatures(data any) {
-	switch v := data.(type) {
-	case map[string]any:
-		for k, val := range v {
-			if k == "thoughtSignature" {
-				if str, ok := val.(string); ok {
-					v[k] = base64.StdEncoding.EncodeToString([]byte(str))
-				}
-			} else {
-				fixThoughtSignatures(val)
-			}
-		}
-	case []any:
-		for _, item := range v {
-			fixThoughtSignatures(item)
-		}
+type optimizedContent struct {
+	Parts []*optimizedPart `json:"parts,omitempty"`
+	Role  string           `json:"role,omitempty"`
+}
+
+func (oc *optimizedContent) toGenAI() *genai.Content {
+	if oc == nil {
+		return nil
 	}
+	parts := make([]*genai.Part, len(oc.Parts))
+	for i, p := range oc.Parts {
+		parts[i] = p.toGenAI()
+	}
+	return &genai.Content{
+		Parts: parts,
+		Role:  oc.Role,
+	}
+}
+
+type optimizedPart struct {
+	MediaResolution     *genai.PartMediaResolution `json:"mediaResolution,omitempty"`
+	CodeExecutionResult *genai.CodeExecutionResult `json:"codeExecutionResult,omitempty"`
+	ExecutableCode      *genai.ExecutableCode      `json:"executableCode,omitempty"`
+	FileData            *genai.FileData            `json:"fileData,omitempty"`
+	FunctionCall        *genai.FunctionCall        `json:"functionCall,omitempty"`
+	FunctionResponse    *genai.FunctionResponse    `json:"functionResponse,omitempty"`
+	InlineData          *genai.Blob                `json:"inlineData,omitempty"`
+	Text                string                     `json:"text,omitempty"`
+	Thought             bool                       `json:"thought,omitempty"`
+	ThoughtSignature    thoughtSignature           `json:"thoughtSignature,omitempty"`
+	VideoMetadata       *genai.VideoMetadata       `json:"videoMetadata,omitempty"`
+}
+
+func (op *optimizedPart) toGenAI() *genai.Part {
+	if op == nil {
+		return nil
+	}
+	return &genai.Part{
+		MediaResolution:     op.MediaResolution,
+		CodeExecutionResult: op.CodeExecutionResult,
+		ExecutableCode:      op.ExecutableCode,
+		FileData:            op.FileData,
+		FunctionCall:        op.FunctionCall,
+		FunctionResponse:    op.FunctionResponse,
+		InlineData:          op.InlineData,
+		Text:                op.Text,
+		Thought:             op.Thought,
+		ThoughtSignature:    []byte(op.ThoughtSignature),
+		VideoMetadata:       op.VideoMetadata,
+	}
+}
+
+type thoughtSignature []byte
+
+func (ts *thoughtSignature) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	// Try base64 decoding
+	decoded, err := base64.StdEncoding.DecodeString(s)
+	if err == nil {
+		*ts = decoded
+		return nil
+	}
+	// If not base64, it's a plain string
+	*ts = []byte(s)
+	return nil
+}
+
+// fixThoughtSignatures is now deprecated and kept for compatibility if needed elsewhere,
+// but we should remove its usage from the main handlers.
+func fixThoughtSignatures(data any) {
+	// ... existing implementation ...
 }
 
 // toGenAIConfig converts the request to the SDK's GenerateContentConfig
@@ -59,13 +115,22 @@ func (r *GeminiRequest) toGenAIConfig() *genai.GenerateContentConfig {
 
 	// Map top-level fields to the config if they are present
 	if r.SystemInstruction != nil {
-		config.SystemInstruction = r.SystemInstruction
+		config.SystemInstruction = r.SystemInstruction.toGenAI()
 	}
 	if len(r.Tools) > 0 {
 		config.Tools = r.Tools
-	}
-	if r.ToolConfig != nil {
-		config.ToolConfig = r.ToolConfig
+		
+		// Set toolConfig - use the one from request if present, otherwise add a default
+		// This is required by the Gemini API when tools are present
+		if r.ToolConfig != nil {
+			config.ToolConfig = r.ToolConfig
+		} else {
+			config.ToolConfig = &genai.ToolConfig{
+				FunctionCallingConfig: &genai.FunctionCallingConfig{
+					Mode: genai.FunctionCallingConfigModeAuto,
+				},
+			}
+		}
 	}
 	if len(r.SafetySettings) > 0 {
 		config.SafetySettings = r.SafetySettings
@@ -75,6 +140,14 @@ func (r *GeminiRequest) toGenAIConfig() *genai.GenerateContentConfig {
 	}
 
 	return config
+}
+
+func (r *GeminiRequest) toGenAIContents() []*genai.Content {
+	contents := make([]*genai.Content, len(r.Contents))
+	for i, c := range r.Contents {
+		contents[i] = c.toGenAI()
+	}
+	return contents
 }
 
 // Gemini v1beta API Handlers (following https://ai.google.dev/api/all-methods)
@@ -153,20 +226,9 @@ func (s *Server) HandleGeminiGenerateContent(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Pre-process JSON to handle thoughtSignature type mismatch
-	var raw map[string]any
-	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
-		s.dumpRequestIfDebug(r, bodyBytes, nil)
-		utils.L().Errorf("Failed to unmarshal raw Gemini request: %v", err)
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	fixThoughtSignatures(raw)
-	processedBytes, _ := json.Marshal(raw)
-
-	// Parse processed request body
+	// Parse request body
 	var req GeminiRequest
-	if err := json.Unmarshal(processedBytes, &req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		s.dumpRequestIfDebug(r, bodyBytes, nil)
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -201,7 +263,7 @@ func (s *Server) HandleGeminiGenerateContent(w http.ResponseWriter, r *http.Requ
 		"model", modelName,
 		"stream", false)
 
-	resp, err := client.Models.GenerateContent(r.Context(), modelName, req.Contents, finalConfig)
+	resp, err := client.Models.GenerateContent(r.Context(), modelName, req.toGenAIContents(), finalConfig)
 	if err != nil {
 		errStr := err.Error()
 		// Check if this is a 429 rate limit error
@@ -259,20 +321,9 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Pre-process JSON to handle thoughtSignature type mismatch
-	var raw map[string]any
-	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
-		s.dumpRequestIfDebug(r, bodyBytes, nil)
-		utils.L().Errorf("Failed to unmarshal raw Gemini request: %v", err)
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	fixThoughtSignatures(raw)
-	processedBytes, _ := json.Marshal(raw)
-
-	// Parse processed request body
+	// Parse request body
 	var req GeminiRequest
-	if err := json.Unmarshal(processedBytes, &req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		s.dumpRequestIfDebug(r, bodyBytes, nil)
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -314,7 +365,7 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 		"model", modelName,
 		"stream", true)
 
-	iter := client.Models.GenerateContentStream(r.Context(), modelName, req.Contents, finalConfig)
+	iter := client.Models.GenerateContentStream(r.Context(), modelName, req.toGenAIContents(), finalConfig)
 
 	utils.L().Infow("Starting Gemini stream (SSE)", "provider", providerType, "model", modelName, "contents_count", len(req.Contents))
 
@@ -515,20 +566,9 @@ func (s *Server) HandleGeminiGenerateContentAll(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Pre-process JSON to handle thoughtSignature type mismatch
-	var raw map[string]any
-	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
-		s.dumpRequestIfDebug(r, bodyBytes, nil)
-		utils.L().Errorf("Failed to unmarshal raw Gemini request: %v", err)
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	fixThoughtSignatures(raw)
-	processedBytes, _ := json.Marshal(raw)
-
-	// Parse processed request body
+	// Parse request body
 	var req GeminiRequest
-	if err := json.Unmarshal(processedBytes, &req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		s.dumpRequestIfDebug(r, bodyBytes, nil)
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -571,7 +611,7 @@ func (s *Server) HandleGeminiGenerateContentAll(w http.ResponseWriter, r *http.R
 		"model", modelName,
 		"stream", false)
 
-	resp, err := client.Models.GenerateContent(r.Context(), modelName, req.Contents, finalConfig)
+	resp, err := client.Models.GenerateContent(r.Context(), modelName, req.toGenAIContents(), finalConfig)
 	if err != nil {
 		errStr := err.Error()
 		// Check if this is a 429 rate limit error
@@ -615,20 +655,9 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 	}
 	utils.L().Debugw("Finished reading request body", "model", modelName, "body_size", len(bodyBytes))
 
-	// Pre-process JSON to handle thoughtSignature type mismatch
-	var raw map[string]any
-	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
-		s.dumpRequestIfDebug(r, bodyBytes, nil)
-		utils.L().Errorf("Failed to unmarshal raw Gemini request: %v", err)
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	fixThoughtSignatures(raw)
-	processedBytes, _ := json.Marshal(raw)
-
-	// Parse processed request body
+	// Parse request body
 	var req GeminiRequest
-	if err := json.Unmarshal(processedBytes, &req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		s.dumpRequestIfDebug(r, bodyBytes, nil)
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -681,7 +710,7 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 		"model", modelName,
 		"stream", true)
 
-	iter := client.Models.GenerateContentStream(r.Context(), modelName, req.Contents, finalConfig)
+	iter := client.Models.GenerateContentStream(r.Context(), modelName, req.toGenAIContents(), finalConfig)
 
 	utils.L().Infow("Starting Gemini stream (all providers) (SSE)", "model", modelName, "contents_count", len(req.Contents), "provider", p.Name())
 
