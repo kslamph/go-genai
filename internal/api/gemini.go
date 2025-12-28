@@ -817,3 +817,263 @@ func (s *Server) dumpResponseIfDebug(r *http.Request, resp any) {
 	respBytes, _ := json.MarshalIndent(resp, "", "  ")
 	fmt.Fprintf(f, "--- [%s] Outgoing Response Chunk ---\n%s\n\n", time.Now().Format(time.RFC3339), string(respBytes))
 }
+
+// ============================================================================
+// Direct Passthrough Handlers for /genai/v1beta
+// These handlers provide minimal processing - only auth, no request/response conversion
+// ============================================================================
+
+// HandleGeminiDirectModels handles GET /genai/v1beta/models - direct passthrough
+func (s *Server) HandleGeminiDirectModels(w http.ResponseWriter, r *http.Request) {
+	// Get any Gemini provider
+	p, err := s.pm.GetAnyGeminiProviderByModel("") // Empty model to get any provider
+	if err != nil {
+		utils.L().Errorf("Failed to get Gemini provider for direct passthrough: %v", err)
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// Get models directly from provider
+	models, err := p.ListModels(r.Context())
+	if err != nil {
+		utils.L().Errorf("Failed to list models for direct passthrough: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Return in Gemini API format
+	type Model struct {
+		Name        string `json:"name"`
+		DisplayName string `json:"displayName,omitempty"`
+		Description string `json:"description,omitempty"`
+	}
+
+	type ListModelsResponse struct {
+		Models []Model `json:"models"`
+	}
+
+	resp := ListModelsResponse{
+		Models: make([]Model, 0, len(models)),
+	}
+
+	for _, modelName := range models {
+		resp.Models = append(resp.Models, Model{
+			Name:        "models/" + modelName,
+			DisplayName: modelName,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		utils.L().Errorf("Failed to encode direct models response: %v", err)
+	}
+}
+
+// HandleGeminiDirectGenerateContent handles POST /genai/v1beta/models/{model}:generateContent - direct passthrough
+func (s *Server) HandleGeminiDirectGenerateContent(w http.ResponseWriter, r *http.Request) {
+	modelName := chi.URLParam(r, "model")
+
+	// Read request body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		utils.L().Errorf("Failed to read request body: %v", err)
+		http.Error(w, "failed to read request body", http.StatusInternalServerError)
+		return
+	}
+
+	// Get provider that supports this model
+	p, err := s.pm.GetAnyGeminiProviderByModel(modelName)
+	if err != nil {
+		utils.L().Errorf("Failed to get Gemini provider for model %s: %v", modelName, err)
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// Log raw request for debugging
+	utils.L().Infow("[DIRECT PASSTHROUGH] Sending request",
+		"model", modelName,
+		"provider", p.Name(),
+		"body_size", len(bodyBytes))
+
+	// Parse the request - we use the same GeminiRequest type as existing handlers
+	// but don't do any extra processing/conversion beyond what's needed to call the SDK
+	var req GeminiRequest
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		utils.L().Errorf("Failed to decode request: %v", err)
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if modelName == "" {
+		http.Error(w, "model is required", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Contents) == 0 {
+		http.Error(w, "contents is required", http.StatusBadRequest)
+		return
+	}
+
+	// Build config for SDK call
+	finalConfig := req.toGenAIConfig()
+
+	// Dump request with config for debugging
+	s.dumpRequestIfDebug(r, bodyBytes, finalConfig)
+
+	client := p.GetClient()
+
+	// Log what we're sending to SDK for debugging
+	utils.L().Infow("[DIRECT PASSTHROUGH] Calling SDK",
+		"model", modelName,
+		"provider", p.Name(),
+		"contents_count", len(req.Contents),
+		"has_system_instruction", finalConfig.SystemInstruction != nil,
+		"tools_count", len(finalConfig.Tools),
+		"has_tool_config", finalConfig.ToolConfig != nil,
+		"safety_settings_count", len(finalConfig.SafetySettings),
+		"cached_content", finalConfig.CachedContent != "")
+
+	// Call the SDK directly with minimal processing
+	// We only do what's required to call the SDK (convert contents and config)
+	resp, err := client.Models.GenerateContent(r.Context(), modelName, req.toGenAIContents(), finalConfig)
+	if err != nil {
+		utils.L().Errorf("[DIRECT PASSTHROUGH] Request failed: %v", err)
+		s.writeGeminiErrorResponse(w, err)
+		return
+	}
+
+	// Return response with minimal processing - just remove SDK metadata
+	w.Header().Set("x-goog-api-client", "genai-go")
+	w.Header().Set("Content-Type", "application/json")
+	
+	cleanResp := cleanGeminiResponse(resp)
+	s.dumpResponseIfDebug(r, cleanResp)
+	
+	if err := json.NewEncoder(w).Encode(cleanResp); err != nil {
+		utils.L().Errorf("Failed to encode response: %v", err)
+	}
+}
+
+// HandleGeminiDirectStreamGenerateContent handles POST /genai/v1beta/models/{model}:streamGenerateContent - direct passthrough
+func (s *Server) HandleGeminiDirectStreamGenerateContent(w http.ResponseWriter, r *http.Request) {
+	modelName := chi.URLParam(r, "model")
+
+	// Read request body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		utils.L().Errorf("Failed to read request body: %v", err)
+		http.Error(w, "failed to read request body", http.StatusInternalServerError)
+		return
+	}
+
+	// Get provider that supports this model
+	p, err := s.pm.GetAnyGeminiProviderByModel(modelName)
+	if err != nil {
+		utils.L().Errorf("Failed to get Gemini provider for model %s: %v", modelName, err)
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// Log raw request for debugging
+	utils.L().Infow("[DIRECT PASSTHROUGH] Sending stream request",
+		"model", modelName,
+		"provider", p.Name(),
+		"body_size", len(bodyBytes))
+
+	// Parse the request - we use the same GeminiRequest type as existing handlers
+	// but don't do any extra processing/conversion beyond what's needed to call the SDK
+	var req GeminiRequest
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		utils.L().Errorf("Failed to decode request: %v", err)
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if modelName == "" {
+		http.Error(w, "model is required", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Contents) == 0 {
+		http.Error(w, "contents is required", http.StatusBadRequest)
+		return
+	}
+
+	// Build config for SDK call
+	finalConfig := req.toGenAIConfig()
+
+	// Dump request with config for debugging
+	s.dumpRequestIfDebug(r, bodyBytes, finalConfig)
+
+	client := p.GetClient()
+
+	// Log what we're sending to SDK for debugging
+	utils.L().Infow("[DIRECT PASSTHROUGH] Calling SDK (stream)",
+		"model", modelName,
+		"provider", p.Name(),
+		"contents_count", len(req.Contents),
+		"has_system_instruction", finalConfig.SystemInstruction != nil,
+		"tools_count", len(finalConfig.Tools),
+		"has_tool_config", finalConfig.ToolConfig != nil,
+		"safety_settings_count", len(finalConfig.SafetySettings),
+		"cached_content", finalConfig.CachedContent != "")
+
+	// Set streaming headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("x-goog-api-client", "genai-go")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// Call the SDK directly with minimal processing
+	// We only do what's required to call the SDK (convert contents and config)
+	iter := client.Models.GenerateContentStream(r.Context(), modelName, req.toGenAIContents(), finalConfig)
+
+	utils.L().Infow("[DIRECT PASSTHROUGH] Starting stream", "model", modelName, "provider", p.Name())
+
+	chunkCount := 0
+
+	for resp, err := range iter {
+		if err != nil {
+			utils.L().Errorf("[DIRECT PASSTHROUGH] Stream error: %v", err)
+			errorObj, _ := json.Marshal(map[string]any{
+				"error": map[string]any{"message": err.Error(), "code": 500},
+			})
+			s.dumpResponseIfDebug(r, map[string]any{"stream_error": err.Error()})
+			fmt.Fprintf(w, "data: %s\n\n", string(errorObj))
+			flusher.Flush()
+			break
+		}
+
+		if resp == nil {
+			continue
+		}
+
+		chunkCount++
+
+		// Return response with minimal processing - just remove SDK metadata
+		cleanResp := cleanGeminiStreamResponse(resp)
+		s.dumpResponseIfDebug(r, cleanResp)
+		
+		data, err := json.Marshal(cleanResp)
+		if err != nil {
+			utils.L().Errorf("Failed to marshal chunk: %v", err)
+			continue
+		}
+
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", string(data)); err != nil {
+			utils.L().Errorf("Failed to write chunk: %v", err)
+			return
+		}
+		flusher.Flush()
+	}
+
+	utils.L().Infow("[DIRECT PASSTHROUGH] Stream completed", "model", modelName, "total_chunks", chunkCount)
+}

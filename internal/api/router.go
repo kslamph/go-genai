@@ -57,15 +57,16 @@ func (s *Server) setupRoutes() {
 	// Following: https://ai.google.dev/api/all-methods
 
 	// All Gemini providers (gemini + antigravity) - load balanced
+	// Using direct passthrough handlers for minimal processing
 	s.router.Route("/v1beta", func(r chi.Router) {
 		// List models: GET /v1beta/models
-		r.Get("/models", s.HandleGeminiModelsAll)
+		r.Get("/models", s.HandleGeminiDirectModels)
 
 		// Generate content: POST /v1beta/models/{model}:generateContent
-		r.Post("/models/{model}:generateContent", s.HandleGeminiGenerateContentAll)
+		r.Post("/models/{model}:generateContent", s.HandleGeminiDirectGenerateContent)
 
 		// Stream generate content: POST /v1beta/models/{model}:streamGenerateContent
-		r.Post("/models/{model}:streamGenerateContent", s.HandleGeminiStreamGenerateContentAll)
+		r.Post("/models/{model}:streamGenerateContent", s.HandleGeminiDirectStreamGenerateContent)
 	})
 
 	// Specific provider Gemini v1beta API endpoints
@@ -78,6 +79,19 @@ func (s *Server) setupRoutes() {
 
 		// Stream generate content: POST /{provider}/v1beta/{model}:streamGenerateContent
 		r.Post("/{model}:streamGenerateContent", s.HandleGeminiStreamGenerateContent)
+	})
+
+	// Legacy Gemini v1beta API endpoints with additional conversion/parsing
+	// This route will eventually be phased out in favor of /v1beta
+	s.router.Route("/genai/v1beta", func(r chi.Router) {
+		// List models: GET /genai/v1beta/models
+		r.Get("/models", s.HandleGeminiModelsAll)
+
+		// Generate content: POST /genai/v1beta/models/{model}:generateContent
+		r.Post("/models/{model}:generateContent", s.HandleGeminiGenerateContentAll)
+
+		// Stream generate content: POST /genai/v1beta/models/{model}:streamGenerateContent
+		r.Post("/models/{model}:streamGenerateContent", s.HandleGeminiStreamGenerateContentAll)
 	})
 
 	s.router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
