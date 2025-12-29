@@ -10,13 +10,13 @@ import (
 )
 
 type Server struct {
-	pm     *manager.PoolManager
+	ps     *manager.ProviderService
 	router *chi.Mux
 }
 
-func NewServer(pm *manager.PoolManager) *Server {
+func NewServer(ps *manager.ProviderService) *Server {
 	s := &Server{
-		pm:     pm,
+		ps:     ps,
 		router: chi.NewRouter(),
 	}
 	s.setupRoutes()
@@ -57,42 +57,30 @@ func (s *Server) setupRoutes() {
 	// Following: https://ai.google.dev/api/all-methods
 
 	// All Gemini providers (gemini + antigravity) - load balanced
-	// Using direct passthrough handlers for minimal processing
+	// Using unified handlers for both specific and load-balanced routes
 	s.router.Route("/v1beta", func(r chi.Router) {
 		// List models: GET /v1beta/models
-		r.Get("/models", s.HandleGeminiDirectModels)
+		r.Get("/models", s.HandleGeminiUnifiedModels)
 
 		// Generate content: POST /v1beta/models/{model}:generateContent
-		r.Post("/models/{model}:generateContent", s.HandleGeminiDirectGenerateContent)
+		r.Post("/models/{model}:generateContent", s.HandleGeminiUnifiedGenerateContent)
 
 		// Stream generate content: POST /v1beta/models/{model}:streamGenerateContent
-		r.Post("/models/{model}:streamGenerateContent", s.HandleGeminiDirectStreamGenerateContent)
+		r.Post("/models/{model}:streamGenerateContent", s.HandleGeminiUnifiedStreamGenerateContent)
 	})
 
 	// Specific provider Gemini v1beta API endpoints
 	s.router.Route("/{provider}/v1beta", func(r chi.Router) {
 		// List models: GET /{provider}/v1beta/models
-		r.Get("/models", s.HandleGeminiModels)
+		r.Get("/models", s.HandleGeminiUnifiedModels)
 
 		// Generate content: POST /{provider}/v1beta/{model}:generateContent
-		r.Post("/{model}:generateContent", s.HandleGeminiGenerateContent)
+		r.Post("/{model}:generateContent", s.HandleGeminiUnifiedGenerateContent)
 
 		// Stream generate content: POST /{provider}/v1beta/{model}:streamGenerateContent
-		r.Post("/{model}:streamGenerateContent", s.HandleGeminiStreamGenerateContent)
+		r.Post("/{model}:streamGenerateContent", s.HandleGeminiUnifiedStreamGenerateContent)
 	})
 
-	// Legacy Gemini v1beta API endpoints with additional conversion/parsing
-	// This route will eventually be phased out in favor of /v1beta
-	s.router.Route("/genai/v1beta", func(r chi.Router) {
-		// List models: GET /genai/v1beta/models
-		r.Get("/models", s.HandleGeminiModelsAll)
-
-		// Generate content: POST /genai/v1beta/models/{model}:generateContent
-		r.Post("/models/{model}:generateContent", s.HandleGeminiGenerateContentAll)
-
-		// Stream generate content: POST /genai/v1beta/models/{model}:streamGenerateContent
-		r.Post("/models/{model}:streamGenerateContent", s.HandleGeminiStreamGenerateContentAll)
-	})
 
 	s.router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -105,7 +93,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) HandleListModels(w http.ResponseWriter, r *http.Request) {
-	models, err := s.pm.ListModels(r.Context())
+	models, err := s.ps.ListModels(r.Context())
 	if err != nil {
 		utils.L().Errorf("Failed to list models: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

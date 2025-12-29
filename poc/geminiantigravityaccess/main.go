@@ -128,8 +128,8 @@ func testAntigravity(ctx context.Context) {
 		ClientSecret: "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",
 		Scope:        "https://www.googleapis.com/auth/cloud-platform",
 		RedirectPort: 8086,
-		CredsDir:     "agent/AIClient-2-API/configs/antigravity",
-		CredsFile:    "1766389593140_oauth_creds.json",
+		CredsDir:     ".antigravity",
+		CredsFile:    "oauth_creds.json",
 	})
 
 	if !antigravityAuth.IsAuthenticated() {
@@ -164,7 +164,7 @@ func testAntigravity(ctx context.Context) {
 		log.Fatalf("Failed to create genai client for Antigravity: %v", err)
 	}
 
-	model := "claude-sonnet-4-5"
+	model := "gpt-oss-120b-medium"
 	runTests(ctx, client, model)
 }
 

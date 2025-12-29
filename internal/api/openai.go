@@ -25,7 +25,7 @@ func (s *Server) HandleProviderListModels(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	models, err := s.pm.ListOpenAIProviderModels(r.Context(), providerType)
+	models, err := s.ps.ListOpenAIProviderModels(r.Context(), providerType)
 	if err != nil {
 		utils.L().Errorf("Failed to list models for provider %s: %v", providerType, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -141,7 +141,7 @@ func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, selectionReason, err := s.pm.GetOpenAIProviderByModelWithReason(req.Model)
+	p, selectionReason, err := s.ps.GetOpenAIProviderByModelWithReason(req.Model)
 	if err != nil {
 		utils.L().Errorf("Failed to find OpenAI-compatible provider for model %s: %v", req.Model, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -177,7 +177,7 @@ func (s *Server) HandleProviderChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, selectionReason, err := s.pm.GetOpenAIProviderWithReason(providerType, req.Model)
+	p, selectionReason, err := s.ps.GetOpenAIProviderWithReason(providerType, req.Model)
 	if err != nil {
 		utils.L().Errorf("Failed to find OpenAI-compatible provider %s for model %s: %v", providerType, req.Model, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -208,12 +208,12 @@ func (s *Server) normalChat(w http.ResponseWriter, r *http.Request, p provider.O
 	resp, err := p.ChatCompletion(r.Context(), req)
 	if err != nil {
 		utils.L().Errorf("Provider %s failed: %v", p.Name(), err)
-		s.pm.RecordFailure(p) // Record failure for load balancing
+		s.ps.RecordFailure(p) // Record failure for load balancing
 		s.writeErrorResponse(w, err)
 		return
 	}
 
-	s.pm.RecordSuccess(req.Model, p)
+	s.ps.RecordSuccess(req.Model, p)
 
 	// Save response to file for inspection (debug mode only)
 	if utils.IsDebugMode() {
@@ -292,14 +292,14 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p provider.O
 		case err := <-errChan:
 			if err != nil {
 				utils.L().Errorf("Stream error from provider %s: %v", p.Name(), err)
-				s.pm.RecordFailure(p) // Record failure for load balancing
+				s.ps.RecordFailure(p) // Record failure for load balancing
 				// SSE error handling is tricky, often just closing is best if started
 			}
 			return
 		case resp, ok := <-respChan:
 			if !ok {
 				// Success record after stream finishes successfully
-				s.pm.RecordSuccess(req.Model, p)
+				s.ps.RecordSuccess(req.Model, p)
 				_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 				flusher.Flush()
 				return

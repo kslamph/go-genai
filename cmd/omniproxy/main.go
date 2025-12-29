@@ -47,14 +47,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 3. Initialize Pool Manager
-	pm, err := manager.NewPoolManager(ctx, cfg)
+	// 3. Initialize Provider Service
+	ps, err := manager.NewProviderServiceManager(ctx, cfg)
 	if err != nil {
-		utils.L().Fatalf("Failed to initialize pool manager: %v", err)
+		utils.L().Fatalf("Failed to initialize provider service: %v", err)
 	}
 
 	// 4. Initialize Server
-	server := api.NewServer(pm)
+	server := api.NewServer(ps)
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", *port),
