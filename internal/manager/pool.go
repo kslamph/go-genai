@@ -44,7 +44,10 @@ type PoolManager struct {
 	// rateLimitRejectTime maps "providerName:model" to the timestamp when it was last rejected due to 429
 	rateLimitRejectTime map[string]time.Time
 
-	// mu protects lastSuccess, failureCount, lastUsedIndex, and rateLimitRejectTime
+	// quotaExhaustedResetTime maps "providerName:model" to the timestamp when quota will be reset
+	quotaExhaustedResetTime map[string]time.Time
+
+	// mu protects lastSuccess, failureCount, lastUsedIndex, rateLimitRejectTime, and quotaExhaustedResetTime
 	mu sync.RWMutex
 
 	// rng for random selection (fallback only)
@@ -54,14 +57,15 @@ type PoolManager struct {
 // NewPoolManager creates a new PoolManager and initializes providers
 func NewPoolManager(ctx context.Context, cfg *config.Config) (*PoolManager, error) {
 	pm := &PoolManager{
-		openaiPools:         make(map[string][]provider.OpenAICompatibleProvider),
-		geminiPools:         make(map[string][]provider.GeminiNativeProvider),
-		kiroPools:           make(map[string][]provider.KiroNativeProvider),
-		lastSuccess:         make(map[string]provider.BaseProvider),
-		failureCount:        make(map[string]int),
-		lastUsedIndex:       make(map[string]int),
-		rateLimitRejectTime: make(map[string]time.Time),
-		rng:                 rand.New(rand.NewSource(time.Now().UnixNano())),
+		openaiPools:            make(map[string][]provider.OpenAICompatibleProvider),
+		geminiPools:            make(map[string][]provider.GeminiNativeProvider),
+		kiroPools:              make(map[string][]provider.KiroNativeProvider),
+		lastSuccess:            make(map[string]provider.BaseProvider),
+		failureCount:           make(map[string]int),
+		lastUsedIndex:          make(map[string]int),
+		rateLimitRejectTime:    make(map[string]time.Time),
+		quotaExhaustedResetTime: make(map[string]time.Time),
+		rng:                    rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	if err := pm.initProviders(ctx, cfg); err != nil {
@@ -396,6 +400,19 @@ func (pm *PoolManager) RecordRateLimitReject(providerName string, model string) 
 		"reject_time", pm.rateLimitRejectTime[key].Format(time.RFC3339))
 }
 
+// RecordQuotaExhausted records a 429 quota exhaustion with explicit reset time for a specific provider-model combination
+func (pm *PoolManager) RecordQuotaExhausted(providerName string, model string, resetTime time.Time) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	key := providerName + ":" + model
+	pm.quotaExhaustedResetTime[key] = resetTime
+	utils.L().Infow("Recorded 429 quota exhaustion with reset time",
+		"provider", providerName,
+		"model", model,
+		"reset_time", resetTime.Format(time.RFC3339),
+		"reset_in", time.Until(resetTime).String())
+}
+
 // ListModels returns a list of all models from OpenAI-compatible providers
 func (pm *PoolManager) ListModels(ctx context.Context) ([]string, error) {
 	uniqueModels := make(map[string]bool)
@@ -472,12 +489,23 @@ func (pm *PoolManager) GetAnyGeminiProviderByModel(model string) (provider.Gemin
 		lastReject    time.Time
 	}
 	
+	now := time.Now()
 	var candidates []candidate
+	var excludedProviders []string
+	
 	for _, pool := range pm.geminiPools {
 		for _, p := range pool {
 			if p.SupportsModel(model) {
 				pm.mu.RLock()
 				key := p.Name() + ":" + model
+				
+				// Check if this provider has active quota exhaustion
+				if resetTime, ok := pm.quotaExhaustedResetTime[key]; ok && resetTime.After(now) {
+					excludedProviders = append(excludedProviders, fmt.Sprintf("%s (quota resets in %s)", p.Name(), time.Until(resetTime).Round(time.Second)))
+					pm.mu.RUnlock()
+					continue
+				}
+				
 				lastReject := pm.rateLimitRejectTime[key]
 				pm.mu.RUnlock()
 				candidates = append(candidates, candidate{
@@ -489,6 +517,9 @@ func (pm *PoolManager) GetAnyGeminiProviderByModel(model string) (provider.Gemin
 	}
 
 	if len(candidates) == 0 {
+		if len(excludedProviders) > 0 {
+			return nil, fmt.Errorf("no available Gemini-native providers for model %s (all excluded due to quota exhaustion: %s)", model, strings.Join(excludedProviders, ", "))
+		}
 		return nil, fmt.Errorf("no Gemini-native providers found for model: %s", model)
 	}
 

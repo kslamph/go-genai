@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -142,6 +143,44 @@ func (r *GeminiRequest) toGenAIConfig() *genai.GenerateContentConfig {
 	return config
 }
 
+// extractQuotaResetTime extracts the quota reset time from a 429 error message
+// Returns the reset time if the error is QUOTA_EXHAUSTED, otherwise returns zero time
+func extractQuotaResetTime(err error) time.Time {
+	if err == nil {
+		return time.Time{}
+	}
+
+	errStr := err.Error()
+	
+	// Check if this is a QUOTA_EXHAUSTED error
+	if !strings.Contains(errStr, "QUOTA_EXHAUSTED") {
+		return time.Time{}
+	}
+
+	// Try to extract the retry delay from the error message
+	// The error message format is: "retryDelay:12345.123456789s"
+	// We'll parse this to get the reset time
+	if strings.Contains(errStr, "retryDelay:") {
+		// Find the retryDelay value
+		parts := strings.Split(errStr, "retryDelay:")
+		if len(parts) > 1 {
+			delayStr := strings.TrimSpace(parts[1])
+			// Extract the duration (it should end with 's')
+			if idx := strings.Index(delayStr, "s"); idx > 0 {
+				delayStr = delayStr[:idx]
+			}
+			// Parse the delay as seconds
+			var delaySeconds float64
+			if _, err := fmt.Sscanf(delayStr, "%f", &delaySeconds); err == nil {
+				resetTime := time.Now().Add(time.Duration(delaySeconds * float64(time.Second)))
+				return resetTime
+			}
+		}
+	}
+
+	return time.Time{}
+}
+
 func (r *GeminiRequest) toGenAIContents() []*genai.Content {
 	contents := make([]*genai.Content, len(r.Contents))
 	for i, c := range r.Contents {
@@ -268,11 +307,23 @@ func (s *Server) HandleGeminiGenerateContent(w http.ResponseWriter, r *http.Requ
 		errStr := err.Error()
 		// Check if this is a 429 rate limit error
 		if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
-			s.pm.RecordRateLimitReject(p.Name(), modelName)
-			utils.L().Errorf("Gemini provider %s failed: 429 rate limit exceeded - recording rejection",
-				"provider", p.Name(),
-				"model", modelName,
-				"error", err)
+			// Check if this is a QUOTA_EXHAUSTED error (hard quota limit)
+			if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
+				s.pm.RecordQuotaExhausted(p.Name(), modelName, resetTime)
+				utils.L().Errorw("Gemini provider failed: 429 quota exhausted - provider excluded until reset",
+					"provider", p.Name(),
+					"model", modelName,
+					"reset_time", resetTime.Format(time.RFC3339),
+					"reset_in", time.Until(resetTime).String(),
+					"error", err)
+			} else {
+				// This is a MODEL_CAPACITY_EXHAUSTED error (temporary capacity issue)
+				s.pm.RecordRateLimitReject(p.Name(), modelName)
+				utils.L().Errorw("Gemini provider failed: 429 rate limit exceeded - recording rejection",
+					"provider", p.Name(),
+					"model", modelName,
+					"error", err)
+			}
 		} else {
 			utils.L().Errorf("Gemini provider %s failed: %v", p.Name(), err)
 		}
@@ -377,18 +428,55 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 			errStr := err.Error()
 			// Check if this is a 429 rate limit error
 			if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
-				s.pm.RecordRateLimitReject(p.Name(), modelName)
-				utils.L().Errorf("Gemini stream error: 429 rate limit exceeded - recording rejection",
-					"provider", p.Name(),
-					"model", modelName,
-					"error", err)
+				// Check if this is a QUOTA_EXHAUSTED error (hard quota limit)
+				if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
+					s.pm.RecordQuotaExhausted(p.Name(), modelName, resetTime)
+					utils.L().Errorw("Gemini stream error: 429 quota exhausted - provider excluded until reset",
+						"provider", p.Name(),
+						"model", modelName,
+						"reset_time", resetTime.Format(time.RFC3339),
+						"reset_in", time.Until(resetTime).String(),
+						"error", err)
+				} else {
+					// This is a MODEL_CAPACITY_EXHAUSTED error (temporary capacity issue)
+					s.pm.RecordRateLimitReject(p.Name(), modelName)
+					utils.L().Errorw("Gemini stream error: 429 rate limit exceeded - recording rejection",
+						"provider", p.Name(),
+						"model", modelName,
+						"error", err)
+				}
 			} else {
 				utils.L().Errorf("Gemini stream error: %v", err)
 			}
-			// Try to send error event
-			errorObj, _ := json.Marshal(map[string]any{
-				"error": map[string]any{"message": err.Error(), "code": 500},
-			})
+
+			// Build structured error response using genai.APIError
+			statusCode := http.StatusInternalServerError
+			message := err.Error()
+			status := ""
+			details := []map[string]any{}
+
+			var apiErr genai.APIError
+			if errors.As(err, &apiErr) {
+				statusCode = apiErr.Code
+				message = apiErr.Message
+				status = apiErr.Status
+				details = apiErr.Details
+			}
+
+			errorResp := map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    statusCode,
+					"message": message,
+				},
+			}
+			if status != "" {
+				errorResp["error"].(map[string]interface{})["status"] = status
+			}
+			if len(details) > 0 {
+				errorResp["error"].(map[string]interface{})["details"] = details
+			}
+
+			errorObj, _ := json.Marshal(errorResp)
 			s.dumpResponseIfDebug(r, map[string]any{"stream_error": err.Error()})
 			fmt.Fprintf(w, "data: %s\n\n", string(errorObj))
 			flusher.Flush()
@@ -424,68 +512,44 @@ func (s *Server) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *htt
 // isNull checks if a raw JSON message represents a null value
 // writeGeminiErrorResponse writes an error response for Gemini API
 func (s *Server) writeGeminiErrorResponse(w http.ResponseWriter, err error) {
+	// Default values
 	statusCode := http.StatusInternalServerError
 	message := err.Error()
-	status := "" // Default to empty, will try to extract from error
+	status := ""
+	details := []map[string]any{}
 
-	// Try to extract status code and status string from error string if it's in genai error format
-	// The genai SDK error format is typically: "googleapi: Error [CODE]: [MESSAGE] [STATUS]"
-	errStr := err.Error()
-	if idx := indexOf(errStr, "Error "); idx >= 0 {
-		var code int
-		var extractedStatus string
-		// Look for the pattern: "Error [CODE]: [MESSAGE] [STATUS]"
-		// Example: "googleapi: Error 400: Request contains an invalid argument., INVALID_ARGUMENT"
-		n, scanErr := fmt.Sscanf(errStr[idx:], "Error %d: %s %s", &code, &message, &extractedStatus)
-		if scanErr == nil && n == 3 {
-			statusCode = code
-			// The message might have been captured with the status, so we need to clean it up
-			// Find the status part in the message and remove it
-			if lastIdx := indexOf(message, extractedStatus); lastIdx > 0 {
-				message = strings.TrimSpace(message[:lastIdx])
-			}
-			status = extractedStatus
-		} else {
-			// If the 3-part scan failed, try to get just the code and message
-			n2, scanErr2 := fmt.Sscanf(errStr[idx:], "Error %d: %s", &code, &message)
-			if scanErr2 == nil && n2 >= 1 {
-				statusCode = code
-				// If we only got the code and message, leave status as empty or try to infer
-				// For now, we'll leave it empty as per the request to use exactly what the endpoint gives
-			}
-		}
+	// Try to extract genai.APIError from the error
+	var apiErr genai.APIError
+	if errors.As(err, &apiErr) {
+		// Use the structured error from genai SDK
+		statusCode = apiErr.Code
+		message = apiErr.Message
+		status = apiErr.Status
+		details = apiErr.Details
+		utils.L().Warnf("Writing Gemini error response from APIError: status=%d, message=%s, status_string=%s", statusCode, message, status)
+	} else {
+		// Fallback to using the raw error
+		utils.L().Warnf("Writing Gemini error response from raw error: status=%d, message=%s", statusCode, message)
 	}
-
-	// If status is still empty, try to infer from the message or leave it empty
-	if status == "" {
-		// Attempt to extract status from the end of the error message
-		// Common statuses: INVALID_ARGUMENT, PERMISSION_DENIED, NOT_FOUND, etc.
-		parts := strings.Split(errStr, " ")
-		for i := len(parts) - 1; i >= 0; i-- {
-			part := strings.TrimRight(parts[i], ".:,;!")
-			// Check if this part looks like a status string (uppercase with underscores)
-			if part != "" && part == strings.ToUpper(part) && strings.Contains(part, "_") {
-				status = part
-				break
-			}
-		}
-	}
-
-	utils.L().Warnf("Writing Gemini error response: status=%d, message=%s, status_string=%s", statusCode, message, status)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 
 	errorResp := map[string]interface{}{
 		"error": map[string]interface{}{
-			"message": message,
 			"code":    statusCode,
+			"message": message,
 		},
 	}
 
-	// Only add the status field if it was successfully extracted
+	// Add status field if available
 	if status != "" {
 		errorResp["error"].(map[string]interface{})["status"] = status
+	}
+
+	// Add details field if available
+	if len(details) > 0 {
+		errorResp["error"].(map[string]interface{})["details"] = details
 	}
 
 	if err := json.NewEncoder(w).Encode(errorResp); err != nil {
@@ -616,11 +680,23 @@ func (s *Server) HandleGeminiGenerateContentAll(w http.ResponseWriter, r *http.R
 		errStr := err.Error()
 		// Check if this is a 429 rate limit error
 		if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
-			s.pm.RecordRateLimitReject(p.Name(), modelName)
-			utils.L().Errorf("Gemini provider %s failed: 429 rate limit exceeded - recording rejection",
-				"provider", p.Name(),
-				"model", modelName,
-				"error", err)
+			// Check if this is a QUOTA_EXHAUSTED error (hard quota limit)
+			if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
+				s.pm.RecordQuotaExhausted(p.Name(), modelName, resetTime)
+				utils.L().Errorw("Gemini provider failed: 429 quota exhausted - provider excluded until reset",
+					"provider", p.Name(),
+					"model", modelName,
+					"reset_time", resetTime.Format(time.RFC3339),
+					"reset_in", time.Until(resetTime).String(),
+					"error", err)
+			} else {
+				// This is a MODEL_CAPACITY_EXHAUSTED error (temporary capacity issue)
+				s.pm.RecordRateLimitReject(p.Name(), modelName)
+				utils.L().Errorw("Gemini provider failed: 429 rate limit exceeded - recording rejection",
+					"provider", p.Name(),
+					"model", modelName,
+					"error", err)
+			}
 		} else {
 			utils.L().Errorf("Gemini provider %s failed: %v", p.Name(), err)
 		}
@@ -721,18 +797,55 @@ func (s *Server) HandleGeminiStreamGenerateContentAll(w http.ResponseWriter, r *
 			errStr := err.Error()
 			// Check if this is a 429 rate limit error
 			if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
-				s.pm.RecordRateLimitReject(p.Name(), modelName)
-				utils.L().Errorf("Gemini stream error mid-way: 429 rate limit exceeded - recording rejection",
-					"provider", p.Name(),
-					"model", modelName,
-					"error", err)
+				// Check if this is a QUOTA_EXHAUSTED error (hard quota limit)
+				if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
+					s.pm.RecordQuotaExhausted(p.Name(), modelName, resetTime)
+					utils.L().Errorw("Gemini stream error mid-way: 429 quota exhausted - provider excluded until reset",
+						"provider", p.Name(),
+						"model", modelName,
+						"reset_time", resetTime.Format(time.RFC3339),
+						"reset_in", time.Until(resetTime).String(),
+						"error", err)
+				} else {
+					// This is a MODEL_CAPACITY_EXHAUSTED error (temporary capacity issue)
+					s.pm.RecordRateLimitReject(p.Name(), modelName)
+					utils.L().Errorw("Gemini stream error mid-way: 429 rate limit exceeded - recording rejection",
+						"provider", p.Name(),
+						"model", modelName,
+						"error", err)
+				}
 			} else {
 				utils.L().Errorf("Gemini stream error mid-way: %v", err)
 			}
-			// Mid-stream error handling
-			errorObj, _ := json.Marshal(map[string]any{
-				"error": map[string]any{"message": err.Error(), "code": 500},
-			})
+
+			// Build structured error response using genai.APIError
+			statusCode := http.StatusInternalServerError
+			message := err.Error()
+			status := ""
+			details := []map[string]any{}
+
+			var apiErr genai.APIError
+			if errors.As(err, &apiErr) {
+				statusCode = apiErr.Code
+				message = apiErr.Message
+				status = apiErr.Status
+				details = apiErr.Details
+			}
+
+			errorResp := map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    statusCode,
+					"message": message,
+				},
+			}
+			if status != "" {
+				errorResp["error"].(map[string]interface{})["status"] = status
+			}
+			if len(details) > 0 {
+				errorResp["error"].(map[string]interface{})["details"] = details
+			}
+
+			errorObj, _ := json.Marshal(errorResp)
 			s.dumpResponseIfDebug(r, map[string]any{"stream_error": err.Error()})
 			fmt.Fprintf(w, "data: %s\n\n", string(errorObj))
 			flusher.Flush()
@@ -938,7 +1051,29 @@ func (s *Server) HandleGeminiDirectGenerateContent(w http.ResponseWriter, r *htt
 	// We only do what's required to call the SDK (convert contents and config)
 	resp, err := client.Models.GenerateContent(r.Context(), modelName, req.toGenAIContents(), finalConfig)
 	if err != nil {
-		utils.L().Errorf("[DIRECT PASSTHROUGH] Request failed: %v", err)
+		errStr := err.Error()
+		// Check if this is a 429 rate limit error
+		if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
+			// Check if this is a QUOTA_EXHAUSTED error (hard quota limit)
+			if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
+				s.pm.RecordQuotaExhausted(p.Name(), modelName, resetTime)
+				utils.L().Errorw("[DIRECT PASSTHROUGH] Request failed: 429 quota exhausted - provider excluded until reset",
+					"provider", p.Name(),
+					"model", modelName,
+					"reset_time", resetTime.Format(time.RFC3339),
+					"reset_in", time.Until(resetTime).String(),
+					"error", err)
+			} else {
+				// This is a MODEL_CAPACITY_EXHAUSTED error (temporary capacity issue)
+				s.pm.RecordRateLimitReject(p.Name(), modelName)
+				utils.L().Errorw("[DIRECT PASSTHROUGH] Request failed: 429 rate limit exceeded - recording rejection",
+					"provider", p.Name(),
+					"model", modelName,
+					"error", err)
+			}
+		} else {
+			utils.L().Errorf("[DIRECT PASSTHROUGH] Request failed: %v", err)
+		}
 		s.writeGeminiErrorResponse(w, err)
 		return
 	}
@@ -1042,10 +1177,58 @@ func (s *Server) HandleGeminiDirectStreamGenerateContent(w http.ResponseWriter, 
 
 	for resp, err := range iter {
 		if err != nil {
-			utils.L().Errorf("[DIRECT PASSTHROUGH] Stream error: %v", err)
-			errorObj, _ := json.Marshal(map[string]any{
-				"error": map[string]any{"message": err.Error(), "code": 500},
-			})
+			errStr := err.Error()
+			// Check if this is a 429 rate limit error
+			if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
+				// Check if this is a QUOTA_EXHAUSTED error (hard quota limit)
+				if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
+					s.pm.RecordQuotaExhausted(p.Name(), modelName, resetTime)
+					utils.L().Errorw("[DIRECT PASSTHROUGH] Stream error: 429 quota exhausted - provider excluded until reset",
+						"provider", p.Name(),
+						"model", modelName,
+						"reset_time", resetTime.Format(time.RFC3339),
+						"reset_in", time.Until(resetTime).String(),
+						"error", err)
+				} else {
+					// This is a MODEL_CAPACITY_EXHAUSTED error (temporary capacity issue)
+					s.pm.RecordRateLimitReject(p.Name(), modelName)
+					utils.L().Errorw("[DIRECT PASSTHROUGH] Stream error: 429 rate limit exceeded - recording rejection",
+						"provider", p.Name(),
+						"model", modelName,
+						"error", err)
+				}
+			} else {
+				utils.L().Errorf("[DIRECT PASSTHROUGH] Stream error: %v", err)
+			}
+
+			// Build structured error response using genai.APIError
+			statusCode := http.StatusInternalServerError
+			message := err.Error()
+			status := ""
+			details := []map[string]any{}
+
+			var apiErr genai.APIError
+			if errors.As(err, &apiErr) {
+				statusCode = apiErr.Code
+				message = apiErr.Message
+				status = apiErr.Status
+				details = apiErr.Details
+			}
+
+			errorResp := map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    statusCode,
+					"message": message,
+				},
+			}
+			if status != "" {
+				errorResp["error"].(map[string]interface{})["status"] = status
+			}
+			if len(details) > 0 {
+				errorResp["error"].(map[string]interface{})["details"] = details
+			}
+
+			errorObj, _ := json.Marshal(errorResp)
 			s.dumpResponseIfDebug(r, map[string]any{"stream_error": err.Error()})
 			fmt.Fprintf(w, "data: %s\n\n", string(errorObj))
 			flusher.Flush()
