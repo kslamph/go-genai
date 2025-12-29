@@ -3,6 +3,7 @@ server.log
 omniproxy_console.log
 request-*.json
 response-*.json
-omniproxy
 gemini-re*.json
 debug_dumps/
+.aider*
+

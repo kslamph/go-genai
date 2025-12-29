@@ -9,13 +9,10 @@ import (
 // ProviderRegistry stores and provides access to all provider instances
 type ProviderRegistry struct {
 	// OpenAI-compatible providers (qwen, iflow)
-	openaiPools map[string][]provider.OpenAICompatibleProvider
+	openaiPools map[provider.ProviderType][]provider.OpenAICompatibleProvider
 
 	// Gemini-native providers (gemini, antigravity)
-	geminiPools map[string][]provider.GeminiNativeProvider
-
-	// Kiro-native providers
-	kiroPools map[string][]provider.KiroNativeProvider
+	geminiPools map[provider.ProviderType][]provider.GeminiNativeProvider
 
 	// mu protects all provider pools
 	mu sync.RWMutex
@@ -24,52 +21,37 @@ type ProviderRegistry struct {
 // NewProviderRegistry creates a new empty registry
 func NewProviderRegistry() *ProviderRegistry {
 	return &ProviderRegistry{
-		openaiPools: make(map[string][]provider.OpenAICompatibleProvider),
-		geminiPools: make(map[string][]provider.GeminiNativeProvider),
-		kiroPools:   make(map[string][]provider.KiroNativeProvider),
+		openaiPools: make(map[provider.ProviderType][]provider.OpenAICompatibleProvider),
+		geminiPools: make(map[provider.ProviderType][]provider.GeminiNativeProvider),
 	}
 }
 
 // RegisterOpenAIProvider adds an OpenAI-compatible provider to the registry
-func (r *ProviderRegistry) RegisterOpenAIProvider(providerType string, p provider.OpenAICompatibleProvider) {
+func (r *ProviderRegistry) RegisterOpenAIProvider(providerType provider.ProviderType, p provider.OpenAICompatibleProvider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.openaiPools[providerType] = append(r.openaiPools[providerType], p)
 }
 
 // RegisterGeminiProvider adds a Gemini-native provider to the registry
-func (r *ProviderRegistry) RegisterGeminiProvider(providerType string, p provider.GeminiNativeProvider) {
+func (r *ProviderRegistry) RegisterGeminiProvider(providerType provider.ProviderType, p provider.GeminiNativeProvider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.geminiPools[providerType] = append(r.geminiPools[providerType], p)
 }
 
-// RegisterKiroProvider adds a Kiro-native provider to the registry
-func (r *ProviderRegistry) RegisterKiroProvider(providerType string, p provider.KiroNativeProvider) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.kiroPools[providerType] = append(r.kiroPools[providerType], p)
-}
-
 // GetOpenAIProviders returns all OpenAI-compatible providers of a given type
-func (r *ProviderRegistry) GetOpenAIProviders(providerType string) []provider.OpenAICompatibleProvider {
+func (r *ProviderRegistry) GetOpenAIProviders(providerType provider.ProviderType) []provider.OpenAICompatibleProvider {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.openaiPools[providerType]
 }
 
 // GetGeminiProviders returns all Gemini-native providers of a given type
-func (r *ProviderRegistry) GetGeminiProviders(providerType string) []provider.GeminiNativeProvider {
+func (r *ProviderRegistry) GetGeminiProviders(providerType provider.ProviderType) []provider.GeminiNativeProvider {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.geminiPools[providerType]
-}
-
-// GetKiroProviders returns all Kiro-native providers of a given type
-func (r *ProviderRegistry) GetKiroProviders(providerType string) []provider.KiroNativeProvider {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.kiroPools[providerType]
 }
 
 // GetAllOpenAIProviders returns all OpenAI-compatible providers from all types

@@ -177,8 +177,8 @@ func NewProviderWithGeminiAuth(ctx context.Context, name string, geminiAuth *aut
 	return provider, nil
 }
 
-func (p *AntigravityProvider) Type() string {
-	return "antigravity"
+func (p *AntigravityProvider) Type() provider.ProviderType {
+	return provider.ProviderAntigravity
 }
 
 func (p *AntigravityProvider) Name() string {

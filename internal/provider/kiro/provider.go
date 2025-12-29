@@ -21,8 +21,8 @@ func NewProvider(name string, auth *Authenticator) *Provider {
 	}
 }
 
-func (p *Provider) Type() string {
-	return "kiro"
+func (p *Provider) Type() provider.ProviderType {
+	return provider.ProviderType("kiro")
 }
 
 func (p *Provider) Name() string {
@@ -30,7 +30,7 @@ func (p *Provider) Name() string {
 }
 
 func (p *Provider) SupportedProtocols() []provider.Protocol {
-	return []provider.Protocol{provider.ProtocolKiro}
+	return []provider.Protocol{provider.Protocol("kiro")}
 }
 
 func (p *Provider) GetAuth() interface{} {

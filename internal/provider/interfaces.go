@@ -39,13 +39,12 @@ type Protocol string
 const (
 	ProtocolOpenAI Protocol = "openai"
 	ProtocolGemini Protocol = "gemini"
-	ProtocolKiro   Protocol = "kiro"
 )
 
 // BaseProvider is the common interface for all providers
 type BaseProvider interface {
 	// Type returns the provider identifier (e.g., "gemini", "kiro", "iflow")
-	Type() string
+	Type() ProviderType
 
 	// Name returns the unique name/ID of this specific instance/credential
 	Name() string
@@ -78,15 +77,4 @@ type GeminiNativeProvider interface {
 
 	// GetClient returns the underlying genai.Client for native protocol access
 	GetClient() *genai.Client
-}
-
-// KiroNativeProvider is for providers with Kiro's custom protocol
-type KiroNativeProvider interface {
-	BaseProvider
-
-	// GetAuth returns the authenticator for native protocol access
-	GetAuth() interface{} // Using interface{} to avoid circular import with kiro package
-
-	// GetRegion returns the AWS region for this provider
-	GetRegion() string
 }

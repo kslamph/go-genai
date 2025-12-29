@@ -9,10 +9,10 @@ import (
 
 	"github.com/sunbankio/omniproxy/auth"
 	"github.com/sunbankio/omniproxy/internal/config"
+	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/internal/provider/antigravity"
 	"github.com/sunbankio/omniproxy/internal/provider/gemini"
 	"github.com/sunbankio/omniproxy/internal/provider/iflow"
-	"github.com/sunbankio/omniproxy/internal/provider/kiro"
 	"github.com/sunbankio/omniproxy/internal/provider/qwen"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 )
@@ -24,12 +24,12 @@ type ProviderInitializer interface {
 
 // BaseProviderInitializer contains common logic for file-based credential discovery
 type BaseProviderInitializer struct {
-	providerType string
+	providerType provider.ProviderType
 	defaultCredsPath string
 }
 
 // NewBaseProviderInitializer creates a new base initializer
-func NewBaseProviderInitializer(providerType, defaultCredsPath string) *BaseProviderInitializer {
+func NewBaseProviderInitializer(providerType provider.ProviderType, defaultCredsPath string) *BaseProviderInitializer {
 	return &BaseProviderInitializer{
 		providerType:    providerType,
 		defaultCredsPath: defaultCredsPath,
@@ -38,7 +38,7 @@ func NewBaseProviderInitializer(providerType, defaultCredsPath string) *BaseProv
 
 // getCredentialPaths returns a list of potential credential paths
 func (b *BaseProviderInitializer) getCredentialPaths(cfg *config.Config) []string {
-	return append([]string{b.defaultCredsPath}, cfg.Credentials[b.providerType]...)
+	return append([]string{b.defaultCredsPath}, cfg.Credentials[string(b.providerType)]...)
 }
 
 // GeminiInitializer initializes Gemini providers
@@ -49,7 +49,7 @@ type GeminiInitializer struct {
 // NewGeminiInitializer creates a new Gemini initializer
 func NewGeminiInitializer() *GeminiInitializer {
 	return &GeminiInitializer{
-		BaseProviderInitializer: NewBaseProviderInitializer("gemini", gemini.DefaultOAuthConfig().CredsPath),
+		BaseProviderInitializer: NewBaseProviderInitializer(provider.ProviderGemini, gemini.DefaultOAuthConfig().CredsPath),
 	}
 }
 
@@ -67,7 +67,7 @@ func (g *GeminiInitializer) Initialize(ctx context.Context, cfg *config.Config, 
 			})
 			p, err := gemini.NewProvider(ctx, fmt.Sprintf("gemini-%d", i), auth)
 			if err == nil {
-				registry.RegisterGeminiProvider("gemini", p)
+				registry.RegisterGeminiProvider(provider.ProviderGemini, p)
 				utils.L().Infof("Loaded Gemini provider: %s from %s", p.Name(), path)
 			} else {
 				utils.L().Warnf("Failed to load Gemini provider from %s: %v", path, err)
@@ -85,7 +85,7 @@ type AntigravityInitializer struct {
 // NewAntigravityInitializer creates a new Antigravity initializer
 func NewAntigravityInitializer() *AntigravityInitializer {
 	return &AntigravityInitializer{
-		BaseProviderInitializer: NewBaseProviderInitializer("antigravity", antigravity.DefaultOAuthConfig().CredsPath),
+		BaseProviderInitializer: NewBaseProviderInitializer(provider.ProviderAntigravity, antigravity.DefaultOAuthConfig().CredsPath),
 	}
 }
 
@@ -127,43 +127,11 @@ func (a *AntigravityInitializer) Initialize(ctx context.Context, cfg *config.Con
 
 			p, err := antigravity.NewProviderWithGeminiAuth(ctx, fmt.Sprintf("antigravity-%d", i), geminiAuth)
 			if err == nil {
-				registry.RegisterGeminiProvider("antigravity", p)
+				registry.RegisterGeminiProvider(provider.ProviderAntigravity, p)
 				utils.L().Infof("Loaded Antigravity provider: %s from %s", p.Name(), path)
 			} else {
 				utils.L().Warnf("Failed to load Antigravity provider from %s: %v", path, err)
 			}
-		}
-	}
-	return nil
-}
-
-// KiroInitializer initializes Kiro providers
-type KiroInitializer struct {
-	*BaseProviderInitializer
-}
-
-// NewKiroInitializer creates a new Kiro initializer
-func NewKiroInitializer() *KiroInitializer {
-	return &KiroInitializer{
-		BaseProviderInitializer: NewBaseProviderInitializer("kiro", kiro.DefaultOAuthConfig().CredsPath),
-	}
-}
-
-// Initialize initializes all Kiro providers
-func (k *KiroInitializer) Initialize(ctx context.Context, cfg *config.Config, registry *ProviderRegistry) error {
-	paths := k.getCredentialPaths(cfg)
-	for i, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			auth := kiro.NewAuthenticator(&kiro.OAuthConfig{
-				Region:        kiro.DefaultOAuthConfig().Region,
-				RefreshURL:    kiro.DefaultOAuthConfig().RefreshURL,
-				RefreshIDCURL: kiro.DefaultOAuthConfig().RefreshIDCURL,
-				BaseURL:       kiro.DefaultOAuthConfig().BaseURL,
-				CredsPath:     path,
-			})
-			p := kiro.NewProvider(fmt.Sprintf("kiro-%d", i), auth)
-			registry.RegisterKiroProvider("kiro", p)
-			utils.L().Infof("Loaded Kiro provider: %s from %s", p.Name(), path)
 		}
 	}
 	return nil
@@ -177,7 +145,7 @@ type QwenInitializer struct {
 // NewQwenInitializer creates a new Qwen initializer
 func NewQwenInitializer() *QwenInitializer {
 	return &QwenInitializer{
-		BaseProviderInitializer: NewBaseProviderInitializer("qwen", qwen.DefaultOAuthConfig().CredsPath),
+		BaseProviderInitializer: NewBaseProviderInitializer(provider.ProviderQwen, qwen.DefaultOAuthConfig().CredsPath),
 	}
 }
 
@@ -194,7 +162,7 @@ func (q *QwenInitializer) Initialize(ctx context.Context, cfg *config.Config, re
 				CredsPath:     path,
 			})
 			p := qwen.NewProvider(fmt.Sprintf("qwen-%d", i), auth)
-			registry.RegisterOpenAIProvider("qwen", p)
+			registry.RegisterOpenAIProvider(provider.ProviderQwen, p)
 			utils.L().Infof("Loaded Qwen provider: %s from %s", p.Name(), path)
 		}
 	}
@@ -209,7 +177,7 @@ type IFlowInitializer struct {
 // NewIFlowInitializer creates a new IFlow initializer
 func NewIFlowInitializer() *IFlowInitializer {
 	return &IFlowInitializer{
-		BaseProviderInitializer: NewBaseProviderInitializer("iflow", iflow.DefaultOAuthConfig().CredsPath),
+		BaseProviderInitializer: NewBaseProviderInitializer(provider.ProviderIFlow, iflow.DefaultOAuthConfig().CredsPath),
 	}
 }
 
@@ -225,7 +193,7 @@ func (i *IFlowInitializer) Initialize(ctx context.Context, cfg *config.Config, r
 				CredsPath:    path,
 			})
 			p := iflow.NewProvider(fmt.Sprintf("iflow-%d", j), auth)
-			registry.RegisterOpenAIProvider("iflow", p)
+			registry.RegisterOpenAIProvider(provider.ProviderIFlow, p)
 			utils.L().Infof("Loaded IFlow provider: %s from %s", p.Name(), path)
 		}
 	}
@@ -234,18 +202,17 @@ func (i *IFlowInitializer) Initialize(ctx context.Context, cfg *config.Config, r
 
 // ProviderFactory orchestrates the initialization of all providers
 type ProviderFactory struct {
-	initializers map[string]ProviderInitializer
+	initializers map[provider.ProviderType]ProviderInitializer
 }
 
 // NewProviderFactory creates a new provider factory
 func NewProviderFactory() *ProviderFactory {
 	return &ProviderFactory{
-		initializers: map[string]ProviderInitializer{
-			"gemini":      NewGeminiInitializer(),
-			"antigravity": NewAntigravityInitializer(),
-			"kiro":        NewKiroInitializer(),
-			"qwen":        NewQwenInitializer(),
-			"iflow":       NewIFlowInitializer(),
+		initializers: map[provider.ProviderType]ProviderInitializer{
+			provider.ProviderGemini:      NewGeminiInitializer(),
+			provider.ProviderAntigravity: NewAntigravityInitializer(),
+			provider.ProviderQwen:        NewQwenInitializer(),
+			provider.ProviderIFlow:       NewIFlowInitializer(),
 		},
 	}
 }

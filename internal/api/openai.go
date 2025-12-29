@@ -19,13 +19,14 @@ func (s *Server) HandleProviderListModels(w http.ResponseWriter, r *http.Request
 	providerType := chi.URLParam(r, "provider")
 
 	// Only allow qwen and iflow providers for OpenAI-compatible API
-	if providerType != "qwen" && providerType != "iflow" {
+	pType := provider.ProviderType(providerType)
+	if pType != provider.ProviderQwen && pType != provider.ProviderIFlow {
 		utils.L().Warnf("Provider %s not available for OpenAI-compatible API", providerType)
 		http.Error(w, fmt.Sprintf("provider '%s' is not available for OpenAI-compatible API. Available providers: qwen, iflow", providerType), http.StatusNotFound)
 		return
 	}
 
-	models, err := s.ps.ListOpenAIProviderModels(r.Context(), providerType)
+	models, err := s.ps.ListOpenAIProviderModels(r.Context(), pType)
 	if err != nil {
 		utils.L().Errorf("Failed to list models for provider %s: %v", providerType, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -165,7 +166,8 @@ func (s *Server) HandleProviderChat(w http.ResponseWriter, r *http.Request) {
 	providerType := chi.URLParam(r, "provider")
 
 	// Only allow qwen and iflow providers for OpenAI-compatible API
-	if providerType != "qwen" && providerType != "iflow" {
+	pType := provider.ProviderType(providerType)
+	if pType != provider.ProviderQwen && pType != provider.ProviderIFlow {
 		utils.L().Warnf("Provider %s not available for OpenAI-compatible API", providerType)
 		http.Error(w, fmt.Sprintf("provider '%s' is not available for OpenAI-compatible API. Available providers: qwen, iflow", providerType), http.StatusNotFound)
 		return
@@ -177,7 +179,7 @@ func (s *Server) HandleProviderChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, selectionReason, err := s.ps.GetOpenAIProviderWithReason(providerType, req.Model)
+	p, selectionReason, err := s.ps.GetOpenAIProviderWithReason(pType, req.Model)
 	if err != nil {
 		utils.L().Errorf("Failed to find OpenAI-compatible provider %s for model %s: %v", providerType, req.Model, err)
 		http.Error(w, err.Error(), http.StatusNotFound)

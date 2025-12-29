@@ -28,8 +28,8 @@ func NewProvider(name string, apiKey string, baseURL string) *Provider {
 	}
 }
 
-func (p *Provider) Type() string {
-	return "openai"
+func (p *Provider) Type() provider.ProviderType {
+	return provider.ProviderOpenAI
 }
 
 func (p *Provider) Name() string {

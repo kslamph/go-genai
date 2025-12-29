@@ -34,8 +34,8 @@ func NewProvider(name string, auth *Authenticator) *Provider {
 	}
 }
 
-func (p *Provider) Type() string {
-	return "iflow"
+func (p *Provider) Type() provider.ProviderType {
+	return provider.ProviderIFlow
 }
 
 func (p *Provider) Name() string {

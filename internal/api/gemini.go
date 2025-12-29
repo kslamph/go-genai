@@ -147,28 +147,52 @@ func extractQuotaResetTime(err error) time.Time {
 
 	errStr := err.Error()
 	
-	// Check if this is a QUOTA_EXHAUSTED error
-	if !strings.Contains(errStr, "QUOTA_EXHAUSTED") {
+	// Check if this is a QUOTA_EXHAUSTED or RATE_LIMIT_EXCEEDED error
+	if !strings.Contains(errStr, "QUOTA_EXHAUSTED") && !strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
 		return time.Time{}
 	}
 
-	// Try to extract the retry delay from the error message
-	// The error message format is: "retryDelay:12345.123456789s"
-	// We'll parse this to get the reset time
-	if strings.Contains(errStr, "retryDelay:") {
-		// Find the retryDelay value
-		parts := strings.Split(errStr, "retryDelay:")
+	// Format 1: "Your quota will reset after 4h53m59s." or "Your quota will reset after 49s."
+	if strings.Contains(errStr, "Your quota will reset after") {
+		parts := strings.Split(errStr, "Your quota will reset after")
 		if len(parts) > 1 {
-			delayStr := strings.TrimSpace(parts[1])
-			// Extract the duration (it should end with 's')
-			if idx := strings.Index(delayStr, "s"); idx > 0 {
-				delayStr = delayStr[:idx]
+			resetPart := strings.TrimSpace(parts[1])
+			// Extract the duration (find the first period or comma as delimiter)
+			delimiters := []string{".", ",", "Status:"}
+			durationStr := resetPart
+			for _, delim := range delimiters {
+				if idx := strings.Index(resetPart, delim); idx > 0 {
+					durationStr = resetPart[:idx]
+					break
+				}
 			}
-			// Parse the delay as seconds
-			var delaySeconds float64
-			if _, err := fmt.Sscanf(delayStr, "%f", &delaySeconds); err == nil {
-				resetTime := time.Now().Add(time.Duration(delaySeconds * float64(time.Second)))
-				return resetTime
+			durationStr = strings.TrimSpace(durationStr)
+			// Parse the duration using Go's time.ParseDuration (supports 4h53m59s, 49s, etc.)
+			if duration, err := time.ParseDuration(durationStr); err == nil {
+				return time.Now().Add(duration)
+			}
+		}
+	}
+
+	// Format 2: "retryDelay:17639.032973961s" or "quotaResetDelay:4h53m59.032973961s"
+	// Extract from any *Delay: format
+	delayPatterns := []string{"retryDelay:", "quotaResetDelay:"}
+	for _, pattern := range delayPatterns {
+		if strings.Contains(errStr, pattern) {
+			parts := strings.Split(errStr, pattern)
+			if len(parts) > 1 {
+				delayStr := strings.TrimSpace(parts[1])
+				// Extract the duration (it should end with 's' or have a delimiter)
+				delimiters := []string{"s", " ", ",", "]", "}"}
+				for _, delim := range delimiters {
+					if idx := strings.Index(delayStr, delim); idx > 0 {
+						delayStr = delayStr[:idx] + "s" // Ensure it ends with 's' for ParseDuration
+						break
+					}
+				}
+				if duration, err := time.ParseDuration(delayStr); err == nil {
+					return time.Now().Add(duration)
+				}
 			}
 		}
 	}
@@ -199,12 +223,13 @@ func (s *Server) HandleGeminiUnifiedModels(w http.ResponseWriter, r *http.Reques
 
 	if providerType != "" {
 		// Specific provider case: only allow gemini and antigravity
-		if providerType != "gemini" && providerType != "antigravity" {
+		pType := provider.ProviderType(providerType)
+		if pType != provider.ProviderGemini && pType != provider.ProviderAntigravity {
 			utils.L().Warnf("Provider %s not available for Gemini v1beta API", providerType)
 			http.Error(w, fmt.Sprintf("provider '%s' is not available for Gemini v1beta API. Available providers: gemini, antigravity", providerType), http.StatusNotFound)
 			return
 		}
-		models, err = s.ps.ListGeminiProviderModels(r.Context(), providerType)
+		models, err = s.ps.ListGeminiProviderModels(r.Context(), pType)
 	} else {
 		// Load-balanced case: get models from all Gemini providers
 		models, err = s.ps.ListGeminiModels(r.Context())
@@ -285,12 +310,13 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 
 	if providerType != "" {
 		// Specific provider case
-		if providerType != "gemini" && providerType != "antigravity" {
+		pType := provider.ProviderType(providerType)
+		if pType != provider.ProviderGemini && pType != provider.ProviderAntigravity {
 			utils.L().Warnf("Provider %s not available for Gemini v1beta API", providerType)
 			http.Error(w, fmt.Sprintf("provider '%s' is not available for Gemini v1beta API. Available providers: gemini, antigravity", providerType), http.StatusNotFound)
 			return
 		}
-		p, err = s.ps.GetGeminiProvider(providerType, modelName)
+		p, err = s.ps.GetGeminiProvider(pType, modelName)
 		if err != nil {
 			utils.L().Errorf("Failed to get Gemini provider %s: %v", providerType, err)
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -392,12 +418,13 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 
 	if providerType != "" {
 		// Specific provider case
-		if providerType != "gemini" && providerType != "antigravity" {
+		pType := provider.ProviderType(providerType)
+		if pType != provider.ProviderGemini && pType != provider.ProviderAntigravity {
 			utils.L().Warnf("Provider %s not available for Gemini v1beta API", providerType)
 			http.Error(w, fmt.Sprintf("provider '%s' is not available for Gemini v1beta API. Available providers: gemini, antigravity", providerType), http.StatusNotFound)
 			return
 		}
-		p, err = s.ps.GetGeminiProvider(providerType, modelName)
+		p, err = s.ps.GetGeminiProvider(pType, modelName)
 		if err != nil {
 			utils.L().Errorf("Failed to get Gemini provider %s: %v", providerType, err)
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -457,7 +484,13 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 			} else {
 				utils.L().Errorf("Gemini stream error: %v", err)
 			}
-			// Build structured error response using genai.APIError
+			// If no chunks have been sent yet, return a standard HTTP error response
+			// instead of sending it as an SSE event
+			if chunkCount == 0 {
+				s.writeGeminiErrorResponse(w, err)
+				return
+			}
+			// Otherwise, send the error as an SSE event (mid-stream error)
 			statusCode := http.StatusInternalServerError
 			message := err.Error()
 			status := ""

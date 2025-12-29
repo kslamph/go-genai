@@ -53,8 +53,8 @@ func NewProvider(ctx context.Context, name string, auth *Authenticator) (*Gemini
 	}, nil
 }
 
-func (p *GeminiProvider) Type() string {
-	return "gemini"
+func (p *GeminiProvider) Type() provider.ProviderType {
+	return provider.ProviderGemini
 }
 
 func (p *GeminiProvider) Name() string {

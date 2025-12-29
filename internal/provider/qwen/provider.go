@@ -32,8 +32,8 @@ func NewProvider(name string, auth *Authenticator) *Provider {
 	}
 }
 
-func (p *Provider) Type() string {
-	return "qwen"
+func (p *Provider) Type() provider.ProviderType {
+	return provider.ProviderQwen
 }
 
 func (p *Provider) Name() string {

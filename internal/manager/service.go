@@ -29,13 +29,13 @@ func NewProviderService(
 }
 
 // GetOpenAIProvider returns an OpenAI-compatible provider for the given type and model
-func (ps *ProviderService) GetOpenAIProvider(providerType string, model string) (provider.OpenAICompatibleProvider, error) {
+func (ps *ProviderService) GetOpenAIProvider(providerType provider.ProviderType, model string) (provider.OpenAICompatibleProvider, error) {
 	p, _, err := ps.GetOpenAIProviderWithReason(providerType, model)
 	return p, err
 }
 
 // GetOpenAIProviderWithReason returns an OpenAI-compatible provider with selection reason
-func (ps *ProviderService) GetOpenAIProviderWithReason(providerType string, model string) (provider.OpenAICompatibleProvider, string, error) {
+func (ps *ProviderService) GetOpenAIProviderWithReason(providerType provider.ProviderType, model string) (provider.OpenAICompatibleProvider, string, error) {
 	// Check if last successful provider for this model matches the type and is OpenAI-compatible
 	last := ps.loadBalancer.GetLastSuccess(model)
 	if last != nil {
@@ -84,12 +84,13 @@ func (ps *ProviderService) GetOpenAIProviderByModelWithReason(model string) (pro
 	}
 
 	// Use smart selection with failure tracking
-	selected := ps.loadBalancer.SelectOpenAIProvider(candidates, "openai-model:"+model)
+	// For model-based selection, we use a special pool key
+	selected := ps.loadBalancer.SelectOpenAIProvider(candidates, provider.ProviderType("model:"+model))
 	return selected, "round-robin", nil
 }
 
 // GetGeminiProvider returns a Gemini-native provider for the given type and model
-func (ps *ProviderService) GetGeminiProvider(providerType string, model string) (provider.GeminiNativeProvider, error) {
+func (ps *ProviderService) GetGeminiProvider(providerType provider.ProviderType, model string) (provider.GeminiNativeProvider, error) {
 	pool := ps.registry.GetGeminiProviders(providerType)
 	if len(pool) == 0 {
 		return nil, fmt.Errorf("no Gemini-native providers available for type: %s", providerType)
@@ -98,17 +99,6 @@ func (ps *ProviderService) GetGeminiProvider(providerType string, model string) 
 	// Select provider based on rate limit rejection time
 	selected := ps.loadBalancer.SelectGeminiProvider(pool, model, ps.rateLimitTracker)
 	return selected, nil
-}
-
-// GetKiroProvider returns a Kiro-native provider for the given type
-func (ps *ProviderService) GetKiroProvider(providerType string) (provider.KiroNativeProvider, error) {
-	pool := ps.registry.GetKiroProviders(providerType)
-	if len(pool) == 0 {
-		return nil, fmt.Errorf("no Kiro-native providers available for type: %s", providerType)
-	}
-
-	// For now, return the first provider. Could add load balancing later.
-	return pool[0], nil
 }
 
 // RecordSuccess records a successful request for a model
@@ -153,7 +143,7 @@ func (ps *ProviderService) ListModels(ctx context.Context) ([]string, error) {
 }
 
 // ListOpenAIProviderModels returns models for a specific OpenAI-compatible provider type
-func (ps *ProviderService) ListOpenAIProviderModels(ctx context.Context, providerType string) ([]string, error) {
+func (ps *ProviderService) ListOpenAIProviderModels(ctx context.Context, providerType provider.ProviderType) ([]string, error) {
 	pool := ps.registry.GetOpenAIProviders(providerType)
 	if len(pool) == 0 {
 		return nil, fmt.Errorf("no OpenAI-compatible providers available for type: %s", providerType)
@@ -163,7 +153,7 @@ func (ps *ProviderService) ListOpenAIProviderModels(ctx context.Context, provide
 }
 
 // ListGeminiProviderModels returns models for a specific Gemini-native provider type
-func (ps *ProviderService) ListGeminiProviderModels(ctx context.Context, providerType string) ([]string, error) {
+func (ps *ProviderService) ListGeminiProviderModels(ctx context.Context, providerType provider.ProviderType) ([]string, error) {
 	pool := ps.registry.GetGeminiProviders(providerType)
 	if len(pool) == 0 {
 		return nil, fmt.Errorf("no Gemini-native providers available for type: %s", providerType)
