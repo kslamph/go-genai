@@ -230,9 +230,9 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 		"gemini-3-pro-preview",
 		"gemini-3-flash",
 		"gemini-2.5-flash",
-		"gemini-claude-sonnet-4-5",
-		"gemini-claude-sonnet-4-5-thinking",
-		"gemini-claude-opus-4-5-thinking",
+		"claude-sonnet-4-5",
+		"claude-sonnet-4-5-thinking",
+		"claude-opus-4-5-thinking",
 	}
 
 	var token string

@@ -201,15 +201,11 @@ func (s *Server) executeChat(w http.ResponseWriter, r *http.Request, p provider.
 }
 
 func (s *Server) normalChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {
-	utils.L().Infow("Sending request to provider",
-		"provider", p.Name(),
-		"provider_type", p.Type(),
-		"model", req.Model,
-		"stream", false)
+	logProviderRequest(p.Name(), string(p.Type()), req.Model, r.URL.Path, r.UserAgent(), false)
 
 	resp, err := p.ChatCompletion(r.Context(), req)
 	if err != nil {
-		utils.L().Errorf("Provider %s failed: %v", p.Name(), err)
+		logProviderError(p.Name(), string(p.Type()), req.Model, false, err)
 		s.ps.RecordFailure(p) // Record failure for load balancing
 		s.writeErrorResponse(w, err)
 		return
@@ -268,11 +264,7 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {
-	utils.L().Infow("Sending request to provider",
-		"provider", p.Name(),
-		"provider_type", p.Type(),
-		"model", req.Model,
-		"stream", true)
+	logProviderRequest(p.Name(), string(p.Type()), req.Model, r.URL.Path, r.UserAgent(), true)
 
 	respChan, errChan := p.StreamChatCompletion(r.Context(), req)
 
@@ -293,7 +285,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p provider.O
 			return
 		case err := <-errChan:
 			if err != nil {
-				utils.L().Errorf("Stream error from provider %s: %v", p.Name(), err)
+				logProviderError(p.Name(), string(p.Type()), req.Model, true, err)
 				s.ps.RecordFailure(p) // Record failure for load balancing
 				// SSE error handling is tricky, often just closing is best if started
 			}

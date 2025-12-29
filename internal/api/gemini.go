@@ -115,7 +115,7 @@ func (r *GeminiRequest) toGenAIConfig() *genai.GenerateContentConfig {
 	}
 	if len(r.Tools) > 0 {
 		config.Tools = r.Tools
-		
+
 		// Set toolConfig - use the one from request if present, otherwise add a default
 		// This is required by the Gemini API when tools are present
 		if r.ToolConfig != nil {
@@ -146,7 +146,7 @@ func extractQuotaResetTime(err error) time.Time {
 	}
 
 	errStr := err.Error()
-	
+
 	// Check if this is a QUOTA_EXHAUSTED or RATE_LIMIT_EXCEEDED error
 	if !strings.Contains(errStr, "QUOTA_EXHAUSTED") && !strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
 		return time.Time{}
@@ -331,13 +331,9 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 			return
 		}
 	}
-	
+
 	client := p.GetClient()
-	utils.L().Infow("Sending request to provider",
-		"provider", p.Name(),
-		"provider_type", providerType,
-		"model", modelName,
-		"stream", false)
+	logProviderRequest(p.Name(), string(p.Type()), modelName, r.URL.Path, r.UserAgent(), false)
 
 	resp, err := client.Models.GenerateContent(r.Context(), modelName, req.toGenAIContents(), finalConfig)
 	if err != nil {
@@ -347,22 +343,14 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 			// Check if this is a QUOTA_EXHAUSTED error (hard quota limit)
 			if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
 				s.ps.RecordQuotaExhausted(p.Name(), modelName, resetTime)
-				utils.L().Errorw("Gemini provider failed: 429 quota exhausted - provider excluded until reset",
-					"provider", p.Name(),
-					"model", modelName,
-					"reset_time", resetTime.Format(time.RFC3339),
-					"reset_in", time.Until(resetTime).String(),
-					"error", err)
+				logProviderError(p.Name(), string(p.Type()), modelName, false, err)
 			} else {
 				// This is a MODEL_CAPACITY_EXHAUSTED error (temporary capacity issue)
 				s.ps.RecordRateLimitReject(p.Name(), modelName)
-				utils.L().Errorw("Gemini provider failed: 429 rate limit exceeded - recording rejection",
-					"provider", p.Name(),
-					"model", modelName,
-					"error", err)
+				logProviderError(p.Name(), string(p.Type()), modelName, false, err)
 			}
 		} else {
-			utils.L().Errorf("Gemini provider %s failed: %v", p.Name(), err)
+			logProviderError(p.Name(), string(p.Type()), modelName, false, err)
 		}
 		s.writeGeminiErrorResponse(w, err)
 		return
@@ -453,11 +441,7 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 		return
 	}
 
-	utils.L().Infow("Sending request to provider",
-		"provider", p.Name(),
-		"provider_type", providerType,
-		"model", modelName,
-		"stream", true)
+	logProviderRequest(p.Name(), string(p.Type()), modelName, r.URL.Path, r.UserAgent(), true)
 
 	iter := client.Models.GenerateContentStream(r.Context(), modelName, req.toGenAIContents(), finalConfig)
 
@@ -468,21 +452,13 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 			if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
 				if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
 					s.ps.RecordQuotaExhausted(p.Name(), modelName, resetTime)
-					utils.L().Errorw("Gemini stream error: 429 quota exhausted - provider excluded until reset",
-						"provider", p.Name(),
-						"model", modelName,
-						"reset_time", resetTime.Format(time.RFC3339),
-						"reset_in", time.Until(resetTime).String(),
-						"error", err)
+					logProviderError(p.Name(), string(p.Type()), modelName, true, err)
 				} else {
 					s.ps.RecordRateLimitReject(p.Name(), modelName)
-					utils.L().Errorw("Gemini stream error: 429 rate limit exceeded - recording rejection",
-						"provider", p.Name(),
-						"model", modelName,
-						"error", err)
+					logProviderError(p.Name(), string(p.Type()), modelName, true, err)
 				}
 			} else {
-				utils.L().Errorf("Gemini stream error: %v", err)
+				logProviderError(p.Name(), string(p.Type()), modelName, true, err)
 			}
 			// If no chunks have been sent yet, return a standard HTTP error response
 			// instead of sending it as an SSE event
@@ -537,7 +513,6 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 		}
 		flusher.Flush()
 	}
-	utils.L().Infow("Gemini stream completed", "provider", p.Name(), "model", modelName, "total_chunks", chunkCount)
 }
 
 // ============================================================================
@@ -618,24 +593,6 @@ func cleanGeminiStreamResponse(resp *genai.GenerateContentResponse) map[string]i
 	return cleanGeminiResponse(resp)
 }
 
-// indexOf is a helper function to find a substring
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}
-
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func (s *Server) getDebugDumpPath(r *http.Request) string {
 	reqID := middleware.GetReqID(r.Context())
 	if reqID == "" {
@@ -652,7 +609,7 @@ func (s *Server) dumpRequestIfDebug(r *http.Request, reqBody []byte, genConfig a
 
 	_ = os.MkdirAll("debug_dumps", 0755)
 	filename := s.getDebugDumpPath(r)
-	
+
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		utils.L().Errorf("Failed to open debug dump file: %v", err)
@@ -677,7 +634,7 @@ func (s *Server) dumpResponseIfDebug(r *http.Request, resp any) {
 
 	_ = os.MkdirAll("debug_dumps", 0755)
 	filename := s.getDebugDumpPath(r)
-	
+
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		utils.L().Errorf("Failed to open debug dump file for response: %v", err)
