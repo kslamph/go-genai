@@ -360,8 +360,6 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 					if antigravityProv, ok := p.(*antigravity.AntigravityProvider); ok {
 						if antigravityProv.GetAuth() != nil {
 							refreshErr = antigravityProv.GetAuth().ForceRefresh(r.Context())
-						} else if antigravityProv.GetAuth() != nil {
-							refreshErr = antigravityProv.GetAuth().ForceRefresh(r.Context())
 						}
 					}
 				}
@@ -519,8 +517,7 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 						if antigravityProv, ok := p.(*antigravity.AntigravityProvider); ok {
 							if antigravityProv.GetAuth() != nil {
 								refreshErr = antigravityProv.GetAuth().ForceRefresh(r.Context())
-							} else if antigravityProv.GetAuth() != nil {
-													refreshErr = antigravityProv.GetAuth().ForceRefresh(r.Context())							}
+							}
 						}
 					}
 
@@ -674,18 +671,22 @@ func (s *Server) writeGeminiErrorResponse(w http.ResponseWriter, err error) {
 // cleanGeminiResponse removes internal SDK metadata from the response
 func cleanGeminiResponse(resp *genai.GenerateContentResponse) map[string]interface{} {
 	if resp == nil {
-		return nil
+		return map[string]interface{}{}
 	}
 
 	// Create a clean response without SDKHTTPResponse
 	result := map[string]interface{}{}
 
 	if resp.Candidates != nil {
-		candidates := make([]interface{}, len(resp.Candidates))
-		for i, c := range resp.Candidates {
-			candidates[i] = c
+		candidates := make([]interface{}, 0, len(resp.Candidates))
+		for _, c := range resp.Candidates {
+			if c != nil {
+				candidates = append(candidates, c)
+			}
 		}
-		result["candidates"] = candidates
+		if len(candidates) > 0 {
+			result["candidates"] = candidates
+		}
 	}
 
 	if !resp.CreateTime.IsZero() {
