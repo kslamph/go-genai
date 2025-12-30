@@ -568,22 +568,40 @@ func (s *Server) writeGeminiErrorResponse(w http.ResponseWriter, err error) {
 
 // cleanGeminiResponse removes internal SDK metadata from the response
 func cleanGeminiResponse(resp *genai.GenerateContentResponse) map[string]interface{} {
-	// Convert to map to remove internal fields
-	data, err := json.Marshal(resp)
-	if err != nil {
-		utils.L().Errorf("Failed to marshal Gemini response for cleaning: %v", err)
+	if resp == nil {
 		return nil
 	}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(data, &result); err != nil {
-		utils.L().Errorf("Failed to unmarshal Gemini response for cleaning: %v", err)
-		return nil
+	// Create a clean response without SDKHTTPResponse
+	result := map[string]interface{}{}
+
+	if resp.Candidates != nil {
+		candidates := make([]interface{}, len(resp.Candidates))
+		for i, c := range resp.Candidates {
+			candidates[i] = c
+		}
+		result["candidates"] = candidates
 	}
 
-	// Remove internal SDK metadata
-	delete(result, "sdkHttpResponse")
-	delete(result, "sdkOperation")
+	if !resp.CreateTime.IsZero() {
+		result["createTime"] = resp.CreateTime.Format(time.RFC3339Nano)
+	}
+
+	if resp.ModelVersion != "" {
+		result["modelVersion"] = resp.ModelVersion
+	}
+
+	if resp.PromptFeedback != nil {
+		result["promptFeedback"] = resp.PromptFeedback
+	}
+
+	if resp.ResponseID != "" {
+		result["responseId"] = resp.ResponseID
+	}
+
+	if resp.UsageMetadata != nil {
+		result["usageMetadata"] = resp.UsageMetadata
+	}
 
 	return result
 }
