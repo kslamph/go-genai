@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sunbankio/omniproxy/internal/provider"
+	"github.com/sunbankio/omniproxy/pkg/utils"
 )
 
 // ProviderService is a facade that coordinates provider operations
@@ -188,7 +189,7 @@ func (ps *ProviderService) GetAnyGeminiProviderByModel(model string) (provider.G
 	// Collect all providers that support this model
 	allProviders := ps.registry.GetAllGeminiProviders()
 	var candidates []provider.GeminiNativeProvider
-	
+
 	for _, p := range allProviders {
 		if p.SupportsModel(model) {
 			candidates = append(candidates, p)
@@ -202,4 +203,13 @@ func (ps *ProviderService) GetAnyGeminiProviderByModel(model string) (provider.G
 	// Select the best candidate based on rate limit tracking
 	selected := ps.loadBalancer.SelectGeminiProvider(candidates, model, ps.rateLimitTracker)
 	return selected, nil
+}
+
+// RemoveInvalidProvider removes a provider from the registry when its credentials are invalid/revoked
+func (ps *ProviderService) RemoveInvalidProvider(p provider.BaseProvider) {
+	utils.L().Infow("Removing invalid provider from registry",
+		"provider", p.Name(),
+		"provider_type", p.Type())
+
+	ps.registry.RemoveProvider(p)
 }

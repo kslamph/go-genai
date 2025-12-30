@@ -14,6 +14,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/sunbankio/omniproxy/internal/provider"
+	"github.com/sunbankio/omniproxy/internal/provider/antigravity"
+	"github.com/sunbankio/omniproxy/internal/provider/gemini"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 	"google.golang.org/genai"
 )
@@ -335,33 +337,78 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 	client := p.GetClient()
 	logProviderRequest(p.Name(), string(p.Type()), modelName, r.URL.Path, r.UserAgent(), false)
 
-	resp, err := client.Models.GenerateContent(r.Context(), modelName, req.toGenAIContents(), finalConfig)
-	if err != nil {
-		errStr := err.Error()
-		// Check if this is a 429 rate limit error
-		if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
-			// Check if this is a QUOTA_EXHAUSTED error (hard quota limit)
-			if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
-				s.ps.RecordQuotaExhausted(p.Name(), modelName, resetTime)
-				logProviderError(p.Name(), string(p.Type()), modelName, false, err)
+	// Add retry loop for 401 errors
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := client.Models.GenerateContent(r.Context(), modelName, req.toGenAIContents(), finalConfig)
+		if err != nil {
+			errStr := err.Error()
+
+			// Check for 401 authentication errors
+			if strings.Contains(errStr, "401") && attempt == 0 {
+				// Force refresh token and retry
+				utils.L().Infow("401 error detected, forcing token refresh and retry",
+					"provider", p.Name(),
+					"model", modelName)
+
+				var refreshErr error
+				switch p.Type() {
+				case provider.ProviderGemini:
+					if geminiProv, ok := p.(*gemini.GeminiProvider); ok {
+						refreshErr = geminiProv.GetAuth().ForceRefresh(r.Context())
+					}
+				case provider.ProviderAntigravity:
+					if antigravityProv, ok := p.(*antigravity.AntigravityProvider); ok {
+						if antigravityProv.GetAuth() != nil {
+							refreshErr = antigravityProv.GetAuth().ForceRefresh(r.Context())
+						} else if antigravityProv.GetAuth() != nil {
+							refreshErr = antigravityProv.GetAuth().ForceRefresh(r.Context())
+						}
+					}
+				}
+
+				if refreshErr != nil {
+					utils.L().Errorw("Token refresh failed after 401 error",
+						"provider", p.Name(),
+						"model", modelName,
+						"error", refreshErr)
+
+					// Remove provider from registry if refresh failed
+					s.removeInvalidProvider(p, modelName)
+
+					logProviderError(p.Name(), string(p.Type()), modelName, false, err)
+					s.writeGeminiErrorResponse(w, err)
+					return
+				}
+				continue // Retry with fresh token
+			}
+
+			// Check if this is a 429 rate limit error
+			if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
+				// Check if this is a QUOTA_EXHAUSTED error (hard quota limit)
+				if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
+					s.ps.RecordQuotaExhausted(p.Name(), modelName, resetTime)
+					logProviderError(p.Name(), string(p.Type()), modelName, false, err)
+				} else {
+					// This is a MODEL_CAPACITY_EXHAUSTED error (temporary capacity issue)
+					s.ps.RecordRateLimitReject(p.Name(), modelName)
+					logProviderError(p.Name(), string(p.Type()), modelName, false, err)
+				}
 			} else {
-				// This is a MODEL_CAPACITY_EXHAUSTED error (temporary capacity issue)
-				s.ps.RecordRateLimitReject(p.Name(), modelName)
 				logProviderError(p.Name(), string(p.Type()), modelName, false, err)
 			}
-		} else {
-			logProviderError(p.Name(), string(p.Type()), modelName, false, err)
+			s.writeGeminiErrorResponse(w, err)
+			return
 		}
-		s.writeGeminiErrorResponse(w, err)
-		return
-	}
 
-	w.Header().Set("x-goog-api-client", "genai-go")
-	w.Header().Set("Content-Type", "application/json")
-	cleanResp := cleanGeminiResponse(resp)
-	s.dumpResponseIfDebug(r, cleanResp)
-	if err := json.NewEncoder(w).Encode(cleanResp); err != nil {
-		utils.L().Errorf("Failed to encode Gemini response: %v", err)
+		// Success - process response
+		w.Header().Set("x-goog-api-client", "genai-go")
+		w.Header().Set("Content-Type", "application/json")
+		cleanResp := cleanGeminiResponse(resp)
+		s.dumpResponseIfDebug(r, cleanResp)
+		if err := json.NewEncoder(w).Encode(cleanResp); err != nil {
+			utils.L().Errorf("Failed to encode Gemini response: %v", err)
+		}
+		return // Exit retry loop on success
 	}
 }
 
@@ -443,75 +490,133 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 
 	logProviderRequest(p.Name(), string(p.Type()), modelName, r.URL.Path, r.UserAgent(), true)
 
-	iter := client.Models.GenerateContentStream(r.Context(), modelName, req.toGenAIContents(), finalConfig)
+	// Add retry loop for 401 errors (only before any chunks are sent)
+	for attempt := 0; attempt < 2; attempt++ {
+		iter := client.Models.GenerateContentStream(r.Context(), modelName, req.toGenAIContents(), finalConfig)
 
-	chunkCount := 0
-	for resp, err := range iter {
-		if err != nil {
-			errStr := err.Error()
-			if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
-				if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
-					s.ps.RecordQuotaExhausted(p.Name(), modelName, resetTime)
-					logProviderError(p.Name(), string(p.Type()), modelName, true, err)
+		chunkCount := 0
+		firstErr := true
+		retryNeeded := false
+
+		for resp, err := range iter {
+			if err != nil {
+				errStr := err.Error()
+
+				// Check for 401 authentication errors - only retry on first error before any chunks sent
+				if strings.Contains(errStr, "401") && attempt == 0 && firstErr && chunkCount == 0 {
+					// Force refresh token and retry
+					utils.L().Infow("401 error detected in streaming request, forcing token refresh and retry",
+						"provider", p.Name(),
+						"model", modelName)
+
+					var refreshErr error
+					switch p.Type() {
+					case provider.ProviderGemini:
+						if geminiProv, ok := p.(*gemini.GeminiProvider); ok {
+							refreshErr = geminiProv.GetAuth().ForceRefresh(r.Context())
+						}
+					case provider.ProviderAntigravity:
+						if antigravityProv, ok := p.(*antigravity.AntigravityProvider); ok {
+							if antigravityProv.GetAuth() != nil {
+								refreshErr = antigravityProv.GetAuth().ForceRefresh(r.Context())
+							} else if antigravityProv.GetAuth() != nil {
+													refreshErr = antigravityProv.GetAuth().ForceRefresh(r.Context())							}
+						}
+					}
+
+					if refreshErr != nil {
+						utils.L().Errorw("Token refresh failed after 401 error in streaming request",
+							"provider", p.Name(),
+							"model", modelName,
+							"error", refreshErr)
+
+						// Remove provider from registry if refresh failed
+						s.removeInvalidProvider(p, modelName)
+
+						logProviderError(p.Name(), string(p.Type()), modelName, true, err)
+						s.writeGeminiErrorResponse(w, err)
+						return
+					}
+					// Mark retry needed and break to retry the whole request
+					retryNeeded = true
+					break
+				}
+
+				firstErr = false
+
+				// Check if this is a 429 rate limit error
+				if strings.Contains(errStr, "429") || strings.Contains(errStr, "RESOURCE_EXHAUSTED") || strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
+					if resetTime := extractQuotaResetTime(err); !resetTime.IsZero() {
+						s.ps.RecordQuotaExhausted(p.Name(), modelName, resetTime)
+						logProviderError(p.Name(), string(p.Type()), modelName, true, err)
+					} else {
+						s.ps.RecordRateLimitReject(p.Name(), modelName)
+						logProviderError(p.Name(), string(p.Type()), modelName, true, err)
+					}
 				} else {
-					s.ps.RecordRateLimitReject(p.Name(), modelName)
 					logProviderError(p.Name(), string(p.Type()), modelName, true, err)
 				}
-			} else {
-				logProviderError(p.Name(), string(p.Type()), modelName, true, err)
+				// If no chunks have been sent yet, return a standard HTTP error response
+				// instead of sending it as an SSE event
+				if chunkCount == 0 {
+					s.writeGeminiErrorResponse(w, err)
+					return
+				}
+				// Otherwise, send the error as an SSE event (mid-stream error)
+				statusCode := http.StatusInternalServerError
+				message := err.Error()
+				status := ""
+				details := []map[string]any{}
+				var apiErr genai.APIError
+				if errors.As(err, &apiErr) {
+					statusCode = apiErr.Code
+					message = apiErr.Message
+					status = apiErr.Status
+					details = apiErr.Details
+				}
+				errorResp := map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    statusCode,
+						"message": message,
+					},
+				}
+				if status != "" {
+					errorResp["error"].(map[string]interface{})["status"] = status
+				}
+				if len(details) > 0 {
+					errorResp["error"].(map[string]interface{})["details"] = details
+				}
+				errorObj, _ := json.Marshal(errorResp)
+				s.dumpResponseIfDebug(r, map[string]any{"stream_error": err.Error()})
+				fmt.Fprintf(w, "data: %s\n\n", string(errorObj))
+				flusher.Flush()
+				break
 			}
-			// If no chunks have been sent yet, return a standard HTTP error response
-			// instead of sending it as an SSE event
-			if chunkCount == 0 {
-				s.writeGeminiErrorResponse(w, err)
+			if resp == nil {
+				continue
+			}
+			chunkCount++
+			cleanResp := cleanGeminiStreamResponse(resp)
+			s.dumpResponseIfDebug(r, cleanResp)
+			data, err := json.Marshal(cleanResp)
+			if err != nil {
+				utils.L().Errorf("Failed to marshal chunk: %v", err)
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", string(data)); err != nil {
+				utils.L().Errorf("Failed to write chunk: %v", err)
 				return
 			}
-			// Otherwise, send the error as an SSE event (mid-stream error)
-			statusCode := http.StatusInternalServerError
-			message := err.Error()
-			status := ""
-			details := []map[string]any{}
-			var apiErr genai.APIError
-			if errors.As(err, &apiErr) {
-				statusCode = apiErr.Code
-				message = apiErr.Message
-				status = apiErr.Status
-				details = apiErr.Details
-			}
-			errorResp := map[string]interface{}{
-				"error": map[string]interface{}{
-					"code":    statusCode,
-					"message": message,
-				},
-			}
-			if status != "" {
-				errorResp["error"].(map[string]interface{})["status"] = status
-			}
-			if len(details) > 0 {
-				errorResp["error"].(map[string]interface{})["details"] = details
-			}
-			errorObj, _ := json.Marshal(errorResp)
-			s.dumpResponseIfDebug(r, map[string]any{"stream_error": err.Error()})
-			fmt.Fprintf(w, "data: %s\n\n", string(errorObj))
 			flusher.Flush()
-			break
 		}
-		if resp == nil {
+
+		// If retry is needed, break the outer loop and retry
+		if retryNeeded {
 			continue
 		}
-		chunkCount++
-		cleanResp := cleanGeminiStreamResponse(resp)
-		s.dumpResponseIfDebug(r, cleanResp)
-		data, err := json.Marshal(cleanResp)
-		if err != nil {
-			utils.L().Errorf("Failed to marshal chunk: %v", err)
-			continue
-		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", string(data)); err != nil {
-			utils.L().Errorf("Failed to write chunk: %v", err)
-			return
-		}
-		flusher.Flush()
+
+		// If we got here, the stream completed successfully or failed without retry
+		return
 	}
 }
 
@@ -662,4 +767,14 @@ func (s *Server) dumpResponseIfDebug(r *http.Request, resp any) {
 
 	respBytes, _ := json.MarshalIndent(resp, "", "  ")
 	fmt.Fprintf(f, "--- [%s] Outgoing Response Chunk ---\n%s\n\n", time.Now().Format(time.RFC3339), string(respBytes))
+}
+
+// removeInvalidProvider removes a provider from the registry when its credentials are invalid/revoked
+func (s *Server) removeInvalidProvider(p provider.BaseProvider, modelName string) {
+	utils.L().Errorw("Removing invalid provider from registry due to failed token refresh",
+		"provider", p.Name(),
+		"provider_type", p.Type(),
+		"model", modelName)
+
+	s.ps.RemoveInvalidProvider(p)
 }

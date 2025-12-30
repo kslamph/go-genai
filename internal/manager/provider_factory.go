@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sunbankio/omniproxy/auth"
 	"github.com/sunbankio/omniproxy/internal/config"
 	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/internal/provider/antigravity"
@@ -84,8 +83,10 @@ type AntigravityInitializer struct {
 
 // NewAntigravityInitializer creates a new Antigravity initializer
 func NewAntigravityInitializer() *AntigravityInitializer {
+	homeDir, _ := os.UserHomeDir()
+	defaultCredsPath := filepath.Join(homeDir, antigravity.DefaultOAuthConfig().CredsDir, antigravity.DefaultOAuthConfig().CredsFile)
 	return &AntigravityInitializer{
-		BaseProviderInitializer: NewBaseProviderInitializer(provider.ProviderAntigravity, antigravity.DefaultOAuthConfig().CredsPath),
+		BaseProviderInitializer: NewBaseProviderInitializer(provider.ProviderAntigravity, defaultCredsPath),
 	}
 }
 
@@ -94,10 +95,13 @@ func (a *AntigravityInitializer) Initialize(ctx context.Context, cfg *config.Con
 	paths := a.getCredentialPaths(cfg)
 	for i, path := range paths {
 		if _, err := os.Stat(path); err == nil {
-			credsDir := ".antigravity"
-			credsFile := "oauth_creds.json"
+			homeDir, _ := os.UserHomeDir()
+			defaultCredsPath := filepath.Join(homeDir, antigravity.DefaultOAuthConfig().CredsDir, antigravity.DefaultOAuthConfig().CredsFile)
 
-			if path != antigravity.DefaultOAuthConfig().CredsPath {
+			credsDir := antigravity.DefaultOAuthConfig().CredsDir
+			credsFile := antigravity.DefaultOAuthConfig().CredsFile
+
+			if path != defaultCredsPath {
 				absPath := path
 				if !filepath.IsAbs(path) {
 					if wd, err := os.Getwd(); err == nil {
@@ -116,7 +120,7 @@ func (a *AntigravityInitializer) Initialize(ctx context.Context, cfg *config.Con
 				}
 			}
 
-			geminiAuth := auth.NewGeminiAuthenticator(&auth.GeminiOAuthConfig{
+			antigravityAuth := antigravity.NewAuthenticator(&antigravity.OAuthConfig{
 				ClientID:     antigravity.DefaultOAuthConfig().ClientID,
 				ClientSecret: antigravity.DefaultOAuthConfig().ClientSecret,
 				Scope:        antigravity.DefaultOAuthConfig().Scope,
@@ -125,7 +129,7 @@ func (a *AntigravityInitializer) Initialize(ctx context.Context, cfg *config.Con
 				CredsFile:    credsFile,
 			})
 
-			p, err := antigravity.NewProviderWithGeminiAuth(ctx, fmt.Sprintf("antigravity-%d", i), geminiAuth)
+			p, err := antigravity.NewProviderWithGeminiAuth(ctx, fmt.Sprintf("antigravity-%d", i), antigravityAuth)
 			if err == nil {
 				registry.RegisterGeminiProvider(provider.ProviderAntigravity, p)
 				utils.L().Infof("Loaded Antigravity provider: %s from %s", p.Name(), path)

@@ -14,9 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sunbankio/omniproxy/pkg/utils"
-
 	cloudauth "cloud.google.com/go/auth"
+	"github.com/sunbankio/omniproxy/pkg/utils"
 	"golang.org/x/oauth2"
 )
 
@@ -30,18 +29,19 @@ type OAuthConfig struct {
 	ClientSecret string
 	Scope        string
 	RedirectPort int
-	CredsPath    string
+	CredsDir     string
+	CredsFile    string
 }
 
 // DefaultOAuthConfig returns the default Antigravity OAuth configuration
 func DefaultOAuthConfig() *OAuthConfig {
-	homeDir, _ := os.UserHomeDir()
 	return &OAuthConfig{
 		ClientID:     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
 		ClientSecret: "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",
 		Scope:        "https://www.googleapis.com/auth/cloud-platform",
 		RedirectPort: 8086,
-		CredsPath:    filepath.Join(homeDir, ".antigravity", "oauth_creds.json"),
+		CredsDir:     ".antigravity",
+		CredsFile:    "oauth_creds.json",
 	}
 }
 
@@ -52,6 +52,7 @@ type Credentials struct {
 	TokenType    string `json:"token_type"`
 	ExpiryDate   int64  `json:"expiry_date"`
 	Scope        string `json:"scope,omitempty"`
+	ProjectID    string `json:"project_id,omitempty"` // Antigravity project ID
 }
 
 // Authenticator implements the Authenticator interface for Antigravity
@@ -59,9 +60,8 @@ type Authenticator struct {
 	config      *OAuthConfig
 	credentials *Credentials
 	mu          sync.RWMutex
+	httpClient  *http.Client
 	isValid     bool // Tracks if the credentials are still valid (not revoked)
-
-	httpClient *http.Client
 }
 
 // NewAuthenticator creates a new Antigravity authenticator
@@ -76,26 +76,13 @@ func NewAuthenticator(config *OAuthConfig) *Authenticator {
 	}
 }
 
-// TokenProvider adapts Authenticator to cloudauth.TokenProvider
-type TokenProvider struct {
-	authenticator *Authenticator
-}
-
-func (p *TokenProvider) Token(ctx context.Context) (*cloudauth.Token, error) {
-	token, err := p.authenticator.GetToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &cloudauth.Token{
-		Value:  token,
-		Expiry: time.Now().Add(time.Hour),
-	}, nil
-}
-
+// GetCredentialsPath returns the path to the credentials file
 func (a *Authenticator) GetCredentialsPath() string {
-	return a.config.CredsPath
+	homeDir, _ := os.UserHomeDir()
+	return filepath.Join(homeDir, a.config.CredsDir, a.config.CredsFile)
 }
 
+// IsAuthenticated checks if valid credentials exist
 func (a *Authenticator) IsAuthenticated() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -106,6 +93,7 @@ func (a *Authenticator) IsAuthenticated() bool {
 	}
 
 	if a.credentials == nil {
+		// Try to load from file
 		creds, err := a.loadCredentials()
 		if err != nil {
 			return false
@@ -117,6 +105,7 @@ func (a *Authenticator) IsAuthenticated() bool {
 		a.mu.RLock()
 	}
 
+	// Check if token is still valid (with 30 minute buffer)
 	buffer := time.Duration(TokenRefreshBufferMs) * time.Millisecond
 	return a.credentials != nil && time.Unix(a.credentials.ExpiryDate, 0).After(time.Now().Add(buffer))
 }
@@ -128,6 +117,7 @@ func (a *Authenticator) IsValid() bool {
 	return a.isValid
 }
 
+// loadCredentials loads credentials from file
 func (a *Authenticator) loadCredentials() (*Credentials, error) {
 	credsPath := a.GetCredentialsPath()
 	data, err := os.ReadFile(credsPath)
@@ -143,8 +133,11 @@ func (a *Authenticator) loadCredentials() (*Credentials, error) {
 	return &creds, nil
 }
 
+// saveCredentials saves credentials to file
 func (a *Authenticator) saveCredentials(creds *Credentials) error {
 	credsPath := a.GetCredentialsPath()
+
+	// Create directory if it doesn't exist
 	dir := filepath.Dir(credsPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create credentials directory: %w", err)
@@ -162,6 +155,7 @@ func (a *Authenticator) saveCredentials(creds *Credentials) error {
 	return nil
 }
 
+// GetToken returns a valid access token, refreshing if necessary
 func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -171,6 +165,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("provider credentials are invalid (revoked or expired). Please re-authenticate")
 	}
 
+	// Load credentials if not in memory
 	if a.credentials == nil {
 		creds, err := a.loadCredentials()
 		if err != nil {
@@ -179,6 +174,7 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 		a.credentials = creds
 	}
 
+	// Convert to oauth2.Token
 	token := &oauth2.Token{
 		AccessToken:  a.credentials.AccessToken,
 		RefreshToken: a.credentials.RefreshToken,
@@ -186,7 +182,10 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 		Expiry:       time.Unix(a.credentials.ExpiryDate, 0),
 	}
 
+	// 30 minute buffer
 	buffer := time.Duration(TokenRefreshBufferMs) * time.Millisecond
+
+	// Setup OAuth2 config
 	conf := &oauth2.Config{
 		ClientID:     a.config.ClientID,
 		ClientSecret: a.config.ClientSecret,
@@ -196,13 +195,23 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 			TokenURL: "https://oauth2.googleapis.com/token",
 		},
 	}
+
+	// Create a context with the custom HTTP client
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, a.httpClient)
 
+	// Check if we need to force refresh (if within buffer or expired)
 	if time.Until(token.Expiry) < buffer {
+		utils.L().Infow("Token expiring in less than 30m or expired, forcing refresh",
+			"provider", "Antigravity",
+			"creds_path", a.GetCredentialsPath())
+		// Trick ReuseTokenSource by making the token look expired
 		token.Expiry = time.Now().Add(-1 * time.Second)
 	}
 
+	// Create TokenSource
 	ts := conf.TokenSource(ctx, token)
+
+	// Get token (this will refresh if needed/forced)
 	newToken, err := ts.Token()
 	if err != nil {
 		// Check if this is a 401 error (invalid credentials)
@@ -211,32 +220,48 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 			a.isValid = false
 			utils.L().Errorw("Token refresh failed with 401 - credentials are invalid/revoked. Provider marked as invalid.",
 				"provider", "Antigravity",
-				"creds_path", a.config.CredsPath,
+				"creds_path", a.GetCredentialsPath(),
 				"error", err)
 			return "", fmt.Errorf("credentials are invalid (401). Please re-authenticate: %w", err)
 		}
 
+		utils.L().Errorw("Token refresh failed",
+			"provider", "Antigravity",
+			"creds_path", a.GetCredentialsPath(),
+			"error", err)
+		// Clear creds on failure so we retry/reload next time
 		a.credentials = nil
 		return "", fmt.Errorf("failed to refresh token: %w", err)
 	}
 
+	// Check if token changed or was refreshed
 	if newToken.AccessToken != a.credentials.AccessToken || newToken.RefreshToken != a.credentials.RefreshToken {
+		utils.L().Infow("Token refreshed successfully, saving credentials",
+			"provider", "Antigravity",
+			"creds_path", a.GetCredentialsPath())
+
 		a.credentials.AccessToken = newToken.AccessToken
+		// ReuseTokenSource ensures RefreshToken is preserved if not returned
 		a.credentials.RefreshToken = newToken.RefreshToken
 		a.credentials.TokenType = newToken.TokenType
 		a.credentials.ExpiryDate = newToken.Expiry.Unix()
+		// Scope might update
 		if extraScope, ok := newToken.Extra("scope").(string); ok && extraScope != "" {
 			a.credentials.Scope = extraScope
 		}
+
 		if err := a.saveCredentials(a.credentials); err != nil {
-			utils.L().Errorw("Failed to save credentials", "error", err)
+			utils.L().Errorw("Failed to save refreshed credentials",
+				"provider", "Antigravity",
+				"creds_path", a.GetCredentialsPath(),
+				"error", err)
 		}
 	}
 
 	return a.credentials.AccessToken, nil
 }
 
-// ForceRefresh is same as Gemini
+// ForceRefresh forces a token refresh regardless of expiry
 func (a *Authenticator) ForceRefresh(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -249,11 +274,15 @@ func (a *Authenticator) ForceRefresh(ctx context.Context) error {
 		a.credentials = creds
 	}
 
+	// Temporarily expire the token in memory
+	originalExpiry := a.credentials.ExpiryDate
+	a.credentials.ExpiryDate = time.Now().Add(-1 * time.Hour).Unix()
+
 	token := &oauth2.Token{
 		AccessToken:  a.credentials.AccessToken,
 		RefreshToken: a.credentials.RefreshToken,
 		TokenType:    a.credentials.TokenType,
-		Expiry:       time.Now().Add(-1 * time.Second),
+		Expiry:       time.Now().Add(-1 * time.Second), // Force expired
 	}
 
 	conf := &oauth2.Config{
@@ -270,6 +299,7 @@ func (a *Authenticator) ForceRefresh(ctx context.Context) error {
 	newToken, err := ts.Token()
 
 	if err != nil {
+		a.credentials.ExpiryDate = originalExpiry // Restore if failed
 		return fmt.Errorf("failed to refresh token: %w", err)
 	}
 
@@ -279,20 +309,28 @@ func (a *Authenticator) ForceRefresh(ctx context.Context) error {
 	a.credentials.ExpiryDate = newToken.Expiry.Unix()
 
 	if err := a.saveCredentials(a.credentials); err != nil {
-		utils.L().Errorw("Failed to save credentials", "error", err)
+		utils.L().Errorw("Failed to save refreshed credentials",
+			"provider", "Antigravity",
+			"error", err)
 	}
+
+	utils.L().Infow("Token forced refresh successful",
+		"provider", "Antigravity")
 	return nil
 }
 
-// Authenticate is same logic
+// Authenticate performs the OAuth web flow authentication
 func (a *Authenticator) Authenticate(ctx context.Context) error {
+	// Generate state for CSRF protection
 	stateBytes := make([]byte, 16)
 	if _, err := rand.Read(stateBytes); err != nil {
-		return err
+		return fmt.Errorf("failed to generate state: %w", err)
 	}
 	state := base64.URLEncoding.EncodeToString(stateBytes)
+
 	redirectURI := fmt.Sprintf("http://localhost:%d", a.config.RedirectPort)
 
+	// Build authorization URL
 	authURL := fmt.Sprintf(
 		"https://accounts.google.com/o/oauth2/v2/auth?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&access_type=offline&prompt=consent&state=%s",
 		url.QueryEscape(a.config.ClientID),
@@ -301,47 +339,68 @@ func (a *Authenticator) Authenticate(ctx context.Context) error {
 		url.QueryEscape(state),
 	)
 
+	// Channel to receive the authorization code
 	codeChan := make(chan string, 1)
 	errChan := make(chan error, 1)
+
+	// Start local server to receive callback
 	server := &http.Server{Addr: fmt.Sprintf(":%d", a.config.RedirectPort)}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Verify state
 		if r.URL.Query().Get("state") != state {
 			errChan <- fmt.Errorf("state mismatch")
+			http.Error(w, "State mismatch", http.StatusBadRequest)
 			return
 		}
+
 		code := r.URL.Query().Get("code")
 		if code == "" {
-			errChan <- fmt.Errorf("no code")
+			errChan <- fmt.Errorf("no code in callback")
+			http.Error(w, "No code received", http.StatusBadRequest)
 			return
 		}
-		_, _ = w.Write([]byte("Authorized."))
+
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<html><body><h1>Authorization successful!</h1><p>You can close this window.</p></body></html>"))
 		codeChan <- code
 	})
 
+	// Start server in goroutine
 	go func() {
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			errChan <- err
 		}
 	}()
 
-	fmt.Printf("\n[Antigravity Auth] URL: %s\n", authURL)
+	// Print authorization URL for user
+	fmt.Printf("\n[Antigravity Auth] Please visit the following URL to authorize:\n\n%s\n\n", authURL)
+	fmt.Println("[Antigravity Auth] Waiting for authorization...")
 
+	// Wait for code or error
 	var code string
 	select {
 	case code = <-codeChan:
+		// Got the code
 	case err := <-errChan:
-		_ = server.Shutdown(ctx)
-		return err
+		server.Shutdown(ctx)
+		return fmt.Errorf("authorization failed: %w", err)
 	case <-ctx.Done():
-		_ = server.Shutdown(ctx)
+		server.Shutdown(ctx)
 		return ctx.Err()
+	case <-time.After(5 * time.Minute):
+		server.Shutdown(ctx)
+		return fmt.Errorf("authorization timeout")
 	}
-	_ = server.Shutdown(ctx)
 
+	// Shutdown server
+	server.Shutdown(ctx)
+
+	// Exchange code for tokens
 	return a.exchangeCodeForTokens(ctx, code, redirectURI)
 }
 
+// exchangeCodeForTokens exchanges the authorization code for tokens
 func (a *Authenticator) exchangeCodeForTokens(ctx context.Context, code, redirectURI string) error {
 	data := url.Values{}
 	data.Set("client_id", a.config.ClientID)
@@ -352,19 +411,18 @@ func (a *Authenticator) exchangeCodeForTokens(ctx context.Context, code, redirec
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://oauth2.googleapis.com/token", strings.NewReader(data.Encode()))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to send token request: %w", err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status: %d", resp.StatusCode)
+		return fmt.Errorf("token exchange failed with status: %d", resp.StatusCode)
 	}
 
 	var tokenResp struct {
@@ -374,8 +432,9 @@ func (a *Authenticator) exchangeCodeForTokens(ctx context.Context, code, redirec
 		TokenType    string `json:"token_type"`
 		Scope        string `json:"scope"`
 	}
+
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return err
+		return fmt.Errorf("failed to decode token response: %w", err)
 	}
 
 	a.mu.Lock()
@@ -388,5 +447,100 @@ func (a *Authenticator) exchangeCodeForTokens(ctx context.Context, code, redirec
 	}
 	a.mu.Unlock()
 
-	return a.saveCredentials(a.credentials)
+	// Save credentials
+	if err := a.saveCredentials(a.credentials); err != nil {
+		return fmt.Errorf("failed to save credentials: %w", err)
+	}
+
+	utils.L().Debugw("Authentication successful, credentials saved",
+		"provider", "Antigravity")
+	return nil
+}
+
+// GetProjectID returns the stored project ID for this credential
+func (a *Authenticator) GetProjectID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Load credentials if not in memory
+	if a.credentials == nil {
+		creds, err := a.loadCredentials()
+		if err != nil {
+			return ""
+		}
+		a.credentials = creds
+	}
+
+	return a.credentials.ProjectID
+}
+
+// SetProjectID stores the project ID for this credential
+func (a *Authenticator) SetProjectID(ctx context.Context, projectID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Load credentials if not in memory
+	if a.credentials == nil {
+		creds, err := a.loadCredentials()
+		if err != nil {
+			return fmt.Errorf("credentials not found: %w", err)
+		}
+		a.credentials = creds
+	}
+
+	// Update project ID
+	a.credentials.ProjectID = projectID
+
+	// Save credentials
+	if err := a.saveCredentials(a.credentials); err != nil {
+		return fmt.Errorf("failed to save credentials with project ID: %w", err)
+	}
+
+	utils.L().Infow("Project ID saved to credentials",
+		"provider", "Antigravity",
+		"project_id", projectID)
+	return nil
+}
+
+// GetExpiryDate returns the token expiry date from credentials
+func (a *Authenticator) GetExpiryDate() int64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	// Load credentials if not in memory
+	if a.credentials == nil {
+		creds, err := a.loadCredentials()
+		if err != nil {
+			return 0
+		}
+		a.mu.RUnlock()
+		a.mu.Lock()
+		a.credentials = creds
+		a.mu.Unlock()
+		a.mu.RLock()
+	}
+
+	return a.credentials.ExpiryDate
+}
+
+// TokenProvider adapts Authenticator to cloudauth.TokenProvider
+type TokenProvider struct {
+	authenticator *Authenticator
+}
+
+func (p *TokenProvider) Token(ctx context.Context) (*cloudauth.Token, error) {
+	token, err := p.authenticator.GetToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get actual expiry from credentials
+	p.authenticator.mu.RLock()
+	expiry := time.Unix(p.authenticator.credentials.ExpiryDate, 0)
+	p.authenticator.mu.RUnlock()
+
+	return &cloudauth.Token{
+		Value:  token,
+		Expiry: expiry, // Use actual expiry instead of hardcoded 1 hour
+	}, nil
 }

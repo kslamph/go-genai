@@ -70,10 +70,39 @@ func (r *ProviderRegistry) GetAllOpenAIProviders() []provider.OpenAICompatiblePr
 func (r *ProviderRegistry) GetAllGeminiProviders() []provider.GeminiNativeProvider {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	
+
 	var providers []provider.GeminiNativeProvider
 	for _, pool := range r.geminiPools {
 		providers = append(providers, pool...)
 	}
 	return providers
+}
+
+// RemoveProvider removes a specific provider from the registry
+func (r *ProviderRegistry) RemoveProvider(p provider.BaseProvider) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	switch prov := p.(type) {
+	case provider.GeminiNativeProvider:
+		// Remove from Gemini pools
+		if pool, ok := r.geminiPools[p.Type()]; ok {
+			for i, providerInPool := range pool {
+				if providerInPool.Name() == prov.Name() {
+					r.geminiPools[p.Type()] = append(pool[:i], pool[i+1:]...)
+					break
+				}
+			}
+		}
+	case provider.OpenAICompatibleProvider:
+		// Remove from OpenAI pools
+		if pool, ok := r.openaiPools[p.Type()]; ok {
+			for i, providerInPool := range pool {
+				if providerInPool.Name() == prov.Name() {
+					r.openaiPools[p.Type()] = append(pool[:i], pool[i+1:]...)
+					break
+				}
+			}
+		}
+	}
 }

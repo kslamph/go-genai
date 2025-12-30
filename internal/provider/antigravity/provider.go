@@ -9,10 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
 
 	cloudauth "cloud.google.com/go/auth"
-	"github.com/sunbankio/omniproxy/auth"
 	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 	"google.golang.org/genai"
@@ -28,7 +26,6 @@ type AntigravityProvider struct {
 	client       *genai.Client
 	name         string
 	auth         *Authenticator
-	geminiAuth   *auth.GeminiAuthenticator
 	cachedModels []string
 	mu           sync.RWMutex
 	modelsCached bool
@@ -88,18 +85,18 @@ func NewProvider(ctx context.Context, name string, auth *Authenticator) (*Antigr
 	return provider, nil
 }
 
-// NewProviderWithGeminiAuth creates a new Antigravity provider using auth.GeminiAuthenticator (like POC)
-func NewProviderWithGeminiAuth(ctx context.Context, name string, geminiAuth *auth.GeminiAuthenticator) (*AntigravityProvider, error) {
+// NewProviderWithGeminiAuth creates a new Antigravity provider using Authenticator with project ID support
+func NewProviderWithGeminiAuth(ctx context.Context, name string, auth *Authenticator) (*AntigravityProvider, error) {
 	// 1. Check if project ID is already stored in credentials
-	projectID := geminiAuth.GetProjectID()
+	projectID := auth.GetProjectID()
 
 	if projectID == "" {
 		// Project ID not stored, need to discover it
 		utils.L().Infow("Project ID not found in credentials, discovering...",
 			"provider", name,
-			"creds_path", geminiAuth.GetCredentialsPath())
+			"creds_path", auth.GetCredentialsPath())
 
-		discoveredID, err := discoverProjectIDWithGeminiAuth(ctx, geminiAuth, AntigravityBaseURL)
+		discoveredID, err := discoverProjectIDWithAuth(ctx, auth, AntigravityBaseURL)
 		if err != nil {
 			// Fallback as seen in POC
 			utils.L().Warnw("Failed to discover project ID, using fallback",
@@ -114,7 +111,7 @@ func NewProviderWithGeminiAuth(ctx context.Context, name string, geminiAuth *aut
 				"project_id", projectID)
 
 			// Save the discovered project ID to credentials for future use
-			if err := geminiAuth.SetProjectID(ctx, projectID); err != nil {
+			if err := auth.SetProjectID(ctx, projectID); err != nil {
 				utils.L().Warnw("Failed to save project ID to credentials",
 					"provider", name,
 					"error", err)
@@ -124,11 +121,11 @@ func NewProviderWithGeminiAuth(ctx context.Context, name string, geminiAuth *aut
 		utils.L().Infow("Using stored project ID from credentials",
 			"provider", name,
 			"project_id", projectID,
-			"creds_path", geminiAuth.GetCredentialsPath())
+			"creds_path", auth.GetCredentialsPath())
 	}
 
 	// 2. Create GenAI Client using the same token provider as POC
-	tokenProvider := &geminiTokenProvider{authenticator: geminiAuth}
+	tokenProvider := &TokenProvider{authenticator: auth}
 	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
 		TokenProvider: tokenProvider,
 	})
@@ -150,10 +147,9 @@ func NewProviderWithGeminiAuth(ctx context.Context, name string, geminiAuth *aut
 		"project_id", projectID)
 
 	provider := &AntigravityProvider{
-		client:     client,
-		name:       name,
-		auth:       nil,
-		geminiAuth: geminiAuth,
+		client: client,
+		name:   name,
+		auth:   auth,
 	}
 
 	// Fetch and cache available models at startup
@@ -197,13 +193,9 @@ func (p *AntigravityProvider) GetAuth() *Authenticator {
 	return p.auth
 }
 
-func (p *AntigravityProvider) GetGeminiAuth() *auth.GeminiAuthenticator {
-	return p.geminiAuth
-}
-
 func (p *AntigravityProvider) getProjectID() string {
-	if p.geminiAuth != nil {
-		return p.geminiAuth.GetProjectID()
+	if p.auth != nil {
+		return p.auth.GetProjectID()
 	}
 	return "unknown"
 }
@@ -240,8 +232,6 @@ func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) 
 
 	if p.auth != nil {
 		token, err = p.auth.GetToken(ctx)
-	} else if p.geminiAuth != nil {
-		token, err = p.geminiAuth.GetToken(ctx)
 	} else {
 		utils.L().Warnf("No authenticator available for Antigravity models")
 		p.cachedModels = fallbackModels
@@ -318,34 +308,7 @@ func (p *AntigravityProvider) SupportsModel(model string) bool {
 	return false
 }
 
-type geminiTokenProvider struct {
-	authenticator *auth.GeminiAuthenticator
-}
-
-func (p *geminiTokenProvider) Token(ctx context.Context) (*cloudauth.Token, error) {
-	token, err := p.authenticator.GetToken(ctx)
-	if err != nil {
-		utils.L().Errorw("Failed to get token from authenticator",
-			"creds_path", p.authenticator.GetCredentialsPath(),
-			"error", err)
-		return nil, err
-	}
-
-	tokenPreview := token
-	if len(token) > 20 {
-		tokenPreview = token[:20] + "..."
-	}
-	utils.L().Debugw("Token retrieved",
-		"creds_path", p.authenticator.GetCredentialsPath(),
-		"token_preview", tokenPreview)
-
-	return &cloudauth.Token{
-		Value:  token,
-		Expiry: time.Now().Add(time.Hour),
-	}, nil
-}
-
-func discoverProjectIDWithGeminiAuth(ctx context.Context, authenticator *auth.GeminiAuthenticator, baseURL string) (string, error) {
+func discoverProjectIDWithAuth(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
 	authenticator.ForceRefresh(ctx)
 
 	for attempt := 0; attempt < 2; attempt++ {

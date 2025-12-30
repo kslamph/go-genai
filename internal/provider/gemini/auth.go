@@ -85,13 +85,16 @@ func (p *TokenProvider) Token(ctx context.Context) (*cloudauth.Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	// We don't strictly track expiry in cloudauth.Token here because Authenticator handles refresh.
-	// But giving it an expiry helps.
+
+	// Get actual expiry from credentials
+	p.authenticator.mu.RLock()
+	expiry := time.Unix(p.authenticator.credentials.ExpiryDate, 0)
+	p.authenticator.mu.RUnlock()
+
 	return &cloudauth.Token{
 		Value:  token,
-		Expiry: time.Now().Add(time.Hour),
+		Expiry: expiry, // Use actual expiry instead of hardcoded 1 hour
 	}, nil
-
 }
 
 // GetCredentialsPath returns the path to the credentials file

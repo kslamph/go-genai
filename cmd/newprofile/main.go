@@ -101,7 +101,8 @@ func authenticateGemini(ctx context.Context, credsPath string) error {
 
 func authenticateAntigravity(ctx context.Context, credsPath string) error {
 	config := antigravity.DefaultOAuthConfig()
-	config.CredsPath = credsPath
+	config.CredsDir = filepath.Dir(credsPath)
+	config.CredsFile = filepath.Base(credsPath)
 
 	authenticator := antigravity.NewAuthenticator(config)
 	return authenticator.Authenticate(ctx)

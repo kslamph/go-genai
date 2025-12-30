@@ -11,12 +11,12 @@ import (
 	"time"
 
 	cloudauth "cloud.google.com/go/auth"
-	"github.com/sunbankio/omniproxy/auth"
+	"github.com/sunbankio/omniproxy/internal/provider/antigravity"
 	"google.golang.org/genai"
 )
 
 type geminiTokenProvider struct {
-	authenticator *auth.GeminiAuthenticator
+	authenticator *antigravity.Authenticator
 }
 
 func (p *geminiTokenProvider) Token(ctx context.Context) (*cloudauth.Token, error) {
@@ -30,7 +30,7 @@ func (p *geminiTokenProvider) Token(ctx context.Context) (*cloudauth.Token, erro
 	}, nil
 }
 
-func discoverProjectID(ctx context.Context, authenticator *auth.GeminiAuthenticator, baseURL string) (string, error) {
+func discoverProjectID(ctx context.Context, authenticator *antigravity.Authenticator, baseURL string) (string, error) {
 	authenticator.ForceRefresh(ctx)
 	token, err := authenticator.GetToken(ctx)
 	if err != nil {
@@ -91,7 +91,7 @@ func main() {
 }
 
 func testGeminiCLI(ctx context.Context) {
-	authenticator := auth.NewGeminiAuthenticator(nil)
+	authenticator := antigravity.NewAuthenticator(nil)
 
 	if !authenticator.IsAuthenticated() {
 		log.Println("Gemini CLI: Not authenticated. Skipping.")
@@ -123,7 +123,7 @@ func testGeminiCLI(ctx context.Context) {
 }
 
 func testAntigravity(ctx context.Context) {
-	antigravityAuth := auth.NewGeminiAuthenticator(&auth.GeminiOAuthConfig{
+	antigravityAuth := antigravity.NewAuthenticator(&antigravity.OAuthConfig{
 		ClientID:     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
 		ClientSecret: "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",
 		Scope:        "https://www.googleapis.com/auth/cloud-platform",
