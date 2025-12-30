@@ -23,14 +23,14 @@ type ProviderInitializer interface {
 
 // BaseProviderInitializer contains common logic for file-based credential discovery
 type BaseProviderInitializer struct {
-	providerType provider.ProviderType
+	providerType     provider.ProviderType
 	defaultCredsPath string
 }
 
 // NewBaseProviderInitializer creates a new base initializer
 func NewBaseProviderInitializer(providerType provider.ProviderType, defaultCredsPath string) *BaseProviderInitializer {
 	return &BaseProviderInitializer{
-		providerType:    providerType,
+		providerType:     providerType,
 		defaultCredsPath: defaultCredsPath,
 	}
 }
@@ -38,6 +38,20 @@ func NewBaseProviderInitializer(providerType provider.ProviderType, defaultCreds
 // getCredentialPaths returns a list of potential credential paths
 func (b *BaseProviderInitializer) getCredentialPaths(cfg *config.Config) []string {
 	return append([]string{b.defaultCredsPath}, cfg.Credentials[string(b.providerType)]...)
+}
+
+// getProfiles returns a list of profiles based on configuration
+func (b *BaseProviderInitializer) getProfiles(cfg *config.Config) []*Profile {
+	paths := b.getCredentialPaths(cfg)
+	var profiles []*Profile
+	for i, path := range paths {
+		// Create a profile for each credential path found.
+		// The name is generated based on the provider type and index, 
+		// acting as a unique identifier for this runtime instance.
+		name := fmt.Sprintf("%s-%d", b.providerType, i)
+		profiles = append(profiles, NewProfile(name, b.providerType, path))
+	}
+	return profiles
 }
 
 // GeminiInitializer initializes Gemini providers
@@ -54,8 +68,9 @@ func NewGeminiInitializer() *GeminiInitializer {
 
 // Initialize initializes all Gemini providers
 func (g *GeminiInitializer) Initialize(ctx context.Context, cfg *config.Config, registry *ProviderRegistry) error {
-	paths := g.getCredentialPaths(cfg)
-	for i, path := range paths {
+	profiles := g.getProfiles(cfg)
+	for i, profile := range profiles {
+		path := profile.CredentialPath
 		if _, err := os.Stat(path); err == nil {
 			auth := gemini.NewAuthenticator(&gemini.OAuthConfig{
 				ClientID:     gemini.DefaultOAuthConfig().ClientID,
@@ -64,7 +79,8 @@ func (g *GeminiInitializer) Initialize(ctx context.Context, cfg *config.Config, 
 				RedirectPort: gemini.DefaultOAuthConfig().RedirectPort + i,
 				CredsPath:    path,
 			})
-			p, err := gemini.NewProvider(ctx, fmt.Sprintf("gemini-%d", i), auth)
+			// Use the profile name for the provider
+			p, err := gemini.NewProvider(ctx, profile.Name, auth)
 			if err == nil {
 				registry.RegisterGeminiProvider(provider.ProviderGemini, p)
 				utils.L().Infof("Loaded Gemini provider: %s from %s", p.Name(), path)
@@ -92,8 +108,9 @@ func NewAntigravityInitializer() *AntigravityInitializer {
 
 // Initialize initializes all Antigravity providers
 func (a *AntigravityInitializer) Initialize(ctx context.Context, cfg *config.Config, registry *ProviderRegistry) error {
-	paths := a.getCredentialPaths(cfg)
-	for i, path := range paths {
+	profiles := a.getProfiles(cfg)
+	for i, profile := range profiles {
+		path := profile.CredentialPath
 		if _, err := os.Stat(path); err == nil {
 			homeDir, _ := os.UserHomeDir()
 			defaultCredsPath := filepath.Join(homeDir, antigravity.DefaultOAuthConfig().CredsDir, antigravity.DefaultOAuthConfig().CredsFile)
@@ -129,7 +146,7 @@ func (a *AntigravityInitializer) Initialize(ctx context.Context, cfg *config.Con
 				CredsFile:    credsFile,
 			})
 
-			p, err := antigravity.NewProviderWithGeminiAuth(ctx, fmt.Sprintf("antigravity-%d", i), antigravityAuth)
+			p, err := antigravity.NewProviderWithGeminiAuth(ctx, profile.Name, antigravityAuth)
 			if err == nil {
 				registry.RegisterGeminiProvider(provider.ProviderAntigravity, p)
 				utils.L().Infof("Loaded Antigravity provider: %s from %s", p.Name(), path)
@@ -155,8 +172,9 @@ func NewQwenInitializer() *QwenInitializer {
 
 // Initialize initializes all Qwen providers
 func (q *QwenInitializer) Initialize(ctx context.Context, cfg *config.Config, registry *ProviderRegistry) error {
-	paths := q.getCredentialPaths(cfg)
-	for i, path := range paths {
+	profiles := q.getProfiles(cfg)
+	for _, profile := range profiles {
+		path := profile.CredentialPath
 		if _, err := os.Stat(path); err == nil {
 			auth := qwen.NewAuthenticator(&qwen.OAuthConfig{
 				ClientID:      qwen.DefaultOAuthConfig().ClientID,
@@ -165,7 +183,7 @@ func (q *QwenInitializer) Initialize(ctx context.Context, cfg *config.Config, re
 				DeviceAuthURL: qwen.DefaultOAuthConfig().DeviceAuthURL,
 				CredsPath:     path,
 			})
-			p := qwen.NewProvider(fmt.Sprintf("qwen-%d", i), auth)
+			p := qwen.NewProvider(profile.Name, auth)
 			registry.RegisterOpenAIProvider(provider.ProviderQwen, p)
 			utils.L().Infof("Loaded Qwen provider: %s from %s", p.Name(), path)
 		}
@@ -187,8 +205,9 @@ func NewIFlowInitializer() *IFlowInitializer {
 
 // Initialize initializes all IFlow providers
 func (i *IFlowInitializer) Initialize(ctx context.Context, cfg *config.Config, registry *ProviderRegistry) error {
-	paths := i.getCredentialPaths(cfg)
-	for j, path := range paths {
+	profiles := i.getProfiles(cfg)
+	for j, profile := range profiles {
+		path := profile.CredentialPath
 		if _, err := os.Stat(path); err == nil {
 			auth := iflow.NewAuthenticator(&iflow.OAuthConfig{
 				ClientID:     iflow.DefaultOAuthConfig().ClientID,
@@ -196,7 +215,7 @@ func (i *IFlowInitializer) Initialize(ctx context.Context, cfg *config.Config, r
 				RedirectPort: iflow.DefaultOAuthConfig().RedirectPort + j,
 				CredsPath:    path,
 			})
-			p := iflow.NewProvider(fmt.Sprintf("iflow-%d", j), auth)
+			p := iflow.NewProvider(profile.Name, auth)
 			registry.RegisterOpenAIProvider(provider.ProviderIFlow, p)
 			utils.L().Infof("Loaded IFlow provider: %s from %s", p.Name(), path)
 		}

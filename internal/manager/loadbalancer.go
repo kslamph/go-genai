@@ -69,12 +69,12 @@ func (lb *LoadBalancer) GetLastSuccess(model string) provider.BaseProvider {
 	return val.(provider.BaseProvider)
 }
 
-// SelectOpenAIProvider selects an OpenAI-compatible provider from a pool using round-robin with failure tracking
-func (lb *LoadBalancer) SelectOpenAIProvider(pool []provider.OpenAICompatibleProvider, poolKey provider.ProviderType) provider.OpenAICompatibleProvider {
+// SelectRoundRobin selects a provider from a pool using round-robin with failure tracking
+func (lb *LoadBalancer) SelectRoundRobin(pool []provider.BaseProvider, poolKey provider.ProviderType) provider.BaseProvider {
 	if len(pool) == 0 {
 		return nil
 	}
-	
+
 	if len(pool) == 1 {
 		return pool[0]
 	}
@@ -119,12 +119,12 @@ func (lb *LoadBalancer) SelectOpenAIProvider(pool []provider.OpenAICompatiblePro
 	return pool[selectedIdx]
 }
 
-// SelectGeminiProvider selects a Gemini provider from a pool preferring providers with fewer rejections
-func (lb *LoadBalancer) SelectGeminiProvider(pool []provider.GeminiNativeProvider, poolKey string, rateLimitTracker *RateLimitTracker) provider.GeminiNativeProvider {
+// SelectLeastRecentlyRejected selects a provider from a pool preferring providers with fewer rejections
+func (lb *LoadBalancer) SelectLeastRecentlyRejected(pool []provider.BaseProvider, poolKey string, rateLimitTracker *RateLimitTracker) provider.BaseProvider {
 	if len(pool) == 0 {
 		return nil
 	}
-	
+
 	if len(pool) == 1 {
 		// Check if the single provider is blocked
 		if rateLimitTracker.IsBlocked(pool[0].Name(), poolKey) {
@@ -135,10 +135,10 @@ func (lb *LoadBalancer) SelectGeminiProvider(pool []provider.GeminiNativeProvide
 
 	// Filter out blocked providers first
 	type candidate struct {
-		provider      provider.GeminiNativeProvider
-		lastReject    time.Time
+		provider   provider.BaseProvider
+		lastReject time.Time
 	}
-	
+
 	var candidates []candidate
 	for _, p := range pool {
 		// Skip providers that are currently blocked (quota exhausted)
