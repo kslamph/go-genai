@@ -2,11 +2,16 @@ package qwen
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -239,4 +244,115 @@ func IsTokenValid(credentials Credentials) bool {
 	}
 	// Add 30 second buffer. TokenRefreshBufferMs is defined in constants.go
 	return time.Now().UnixMilli() < credentials.ExpiryDate-TokenRefreshBufferMs
+}
+
+// Authenticate performs the OAuth device authorization flow
+func (a *Authenticator) Authenticate(ctx context.Context) error {
+	return a.authenticateWithDeviceFlow()
+}
+
+// authenticateWithDeviceFlow handles the OAuth 2.0 device authorization flow using the golang.org/x/oauth2 package.
+func (a *Authenticator) authenticateWithDeviceFlow() error {
+	conf := &oauth2.Config{
+		ClientID: a.config.ClientID,
+		Scopes:   []string{a.config.Scope},
+		Endpoint: oauth2.Endpoint{
+			TokenURL:      a.config.TokenURL,
+			DeviceAuthURL: a.config.DeviceAuthURL,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	codeVerifier, err := a.generateCodeVerifier()
+	if err != nil {
+		return fmt.Errorf("failed to generate code verifier: %w", err)
+	}
+	codeChallenge := a.generateCodeChallenge(codeVerifier)
+
+	deviceAuthResponse, err := conf.DeviceAuth(ctx,
+		oauth2.SetAuthURLParam("code_challenge", codeChallenge),
+		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to start device auth flow: %w", err)
+	}
+
+	// Construct verification URL with user code and client parameter
+	// Use "qwen-code" as the client parameter value
+	var verificationURL string
+	if deviceAuthResponse.VerificationURIComplete != "" {
+		verificationURL = deviceAuthResponse.VerificationURIComplete
+	} else {
+		verificationURL = fmt.Sprintf("%s?user_code=%s&client=qwen-code", deviceAuthResponse.VerificationURI, deviceAuthResponse.UserCode)
+	}
+
+	// Try to open the verification URI in the browser
+	if err := a.openBrowser(verificationURL); err != nil {
+		fmt.Printf("Warning: failed to open browser automatically: %v\n", err)
+	}
+
+	fmt.Printf("\n=== Qwen OAuth Authentication ===\n")
+	fmt.Printf("If your browser didn't open, please go to: %s\n", verificationURL)
+	fmt.Printf("And enter this code: %s\n\n", deviceAuthResponse.UserCode)
+	fmt.Println("Waiting for authorization...")
+
+	token, err := conf.DeviceAccessToken(ctx, deviceAuthResponse, oauth2.SetAuthURLParam("code_verifier", codeVerifier))
+	if err != nil {
+		return fmt.Errorf("failed to get token: %w", err)
+	}
+
+	creds := Credentials{
+		AccessToken:  token.AccessToken,
+		TokenType:    token.TokenType,
+		RefreshToken: token.RefreshToken,
+		ExpiryDate:   token.Expiry.UnixMilli(),
+	}
+	if resourceURL, ok := token.Extra("resource_url").(string); ok {
+		creds.ResourceURL = resourceURL
+	}
+
+	a.mu.Lock()
+	a.credentials = &creds
+	a.mu.Unlock()
+
+	if err := a.saveCredentials(creds); err != nil {
+		return fmt.Errorf("failed to save credentials: %w", err)
+	}
+
+	fmt.Println("Authentication successful! Credentials saved.")
+	return nil
+}
+
+// openBrowser opens the default browser with the given URL.
+func (a *Authenticator) openBrowser(url string) error {
+	var err error
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		err = exec.Command("open", url).Start()
+	default:
+		err = fmt.Errorf("unsupported platform")
+	}
+	return err
+}
+
+// generateCodeVerifier generates a random code verifier for PKCE.
+func (a *Authenticator) generateCodeVerifier() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// generateCodeChallenge generates a code challenge from a code verifier using SHA-256.
+func (a *Authenticator) generateCodeChallenge(codeVerifier string) string {
+	h := sha256.New()
+	h.Write([]byte(codeVerifier))
+	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
 }

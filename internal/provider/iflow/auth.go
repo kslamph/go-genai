@@ -2,6 +2,8 @@ package iflow
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -397,5 +400,153 @@ func (a *Authenticator) fetchUserInfo() error {
 		a.credentials.APIKey = apiKey
 	}
 
+	return nil
+}
+
+// Authenticate performs the OAuth web flow authentication
+func (a *Authenticator) Authenticate(ctx context.Context) error {
+	// Generate state for CSRF protection
+	stateBytes := make([]byte, 16)
+	if _, err := rand.Read(stateBytes); err != nil {
+		return fmt.Errorf("failed to generate state: %w", err)
+	}
+	state := base64.URLEncoding.EncodeToString(stateBytes)
+
+	redirectURI := fmt.Sprintf("http://localhost:%d", a.config.RedirectPort)
+
+	// Build authorization URL
+	authURL := fmt.Sprintf(
+		"%s?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&access_type=offline&prompt=consent&state=%s",
+		AuthURL,
+		url.QueryEscape(a.config.ClientID),
+		url.QueryEscape(redirectURI),
+		url.QueryEscape("openid email profile offline_access"),
+		url.QueryEscape(state),
+	)
+
+	// Channel to receive the authorization code
+	codeChan := make(chan string, 1)
+	errChan := make(chan error, 1)
+
+	// Start local server to receive callback
+	server := &http.Server{Addr: fmt.Sprintf(":%d", a.config.RedirectPort)}
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Verify state
+		if r.URL.Query().Get("state") != state {
+			errChan <- fmt.Errorf("state mismatch")
+			http.Error(w, "State mismatch", http.StatusBadRequest)
+			return
+		}
+
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			errChan <- fmt.Errorf("no code in callback")
+			http.Error(w, "No code received", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<html><body><h1>Authorization successful!</h1><p>You can close this window.</p></body></html>"))
+		codeChan <- code
+	})
+
+	// Start server in goroutine
+	go func() {
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			errChan <- err
+		}
+	}()
+
+	// Print authorization URL for user
+	fmt.Printf("\n[iFlow Auth] Please visit the following URL to authorize:\n\n%s\n\n", authURL)
+	fmt.Println("[iFlow Auth] Waiting for authorization...")
+
+	// Wait for code or error
+	var code string
+	select {
+	case code = <-codeChan:
+		// Got the code
+	case err := <-errChan:
+		server.Shutdown(ctx)
+		return fmt.Errorf("authorization failed: %w", err)
+	case <-ctx.Done():
+		server.Shutdown(ctx)
+		return ctx.Err()
+	case <-time.After(5 * time.Minute):
+		server.Shutdown(ctx)
+		return fmt.Errorf("authorization timeout")
+	}
+
+	// Shutdown server
+	server.Shutdown(ctx)
+
+	// Exchange code for tokens
+	return a.exchangeCodeForTokens(ctx, code, redirectURI)
+}
+
+// exchangeCodeForTokens exchanges the authorization code for tokens
+func (a *Authenticator) exchangeCodeForTokens(ctx context.Context, code, redirectURI string) error {
+	data := url.Values{}
+	data.Set("client_id", a.config.ClientID)
+	data.Set("client_secret", a.config.ClientSecret)
+	data.Set("code", code)
+	data.Set("grant_type", "authorization_code")
+	data.Set("redirect_uri", redirectURI)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return fmt.Errorf("failed to create token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send token request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("token exchange failed with status: %d", resp.StatusCode)
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		TokenType    string `json:"token_type"`
+		Scope        string `json:"scope"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return fmt.Errorf("failed to decode token response: %w", err)
+	}
+
+	a.mu.Lock()
+	a.credentials = &Credentials{
+		AuthType:     "oauth",
+		AccessToken:  tokenResp.AccessToken,
+		RefreshToken: tokenResp.RefreshToken,
+		TokenType:    tokenResp.TokenType,
+		ExpiryDate:   time.Now().UnixMilli() + tokenResp.ExpiresIn*1000,
+		Scope:        tokenResp.Scope,
+		Type:         "iflow",
+	}
+	a.mu.Unlock()
+
+	// Fetch user info and API key
+	if err := a.fetchUserInfo(); err != nil {
+		utils.L().Errorw("Failed to fetch user info",
+			"provider", "iFlow",
+			"error", err)
+	}
+
+	// Save credentials
+	if err := a.saveCredentials(); err != nil {
+		return fmt.Errorf("failed to save credentials: %w", err)
+	}
+
+	utils.L().Debugw("Authentication successful, credentials saved",
+		"provider", "iFlow")
 	return nil
 }
