@@ -6,7 +6,7 @@ import (
 	"log"
 
 	"github.com/sashabaranov/go-openai"
-	"github.com/sunbankio/omniproxy/auth"
+	"github.com/sunbankio/omniproxy/pkg/auth"
 )
 
 func main() {
@@ -41,28 +41,28 @@ func main() {
 	client := openai.NewClientWithConfig(clientConfig)
 
 	// Test with qwen3-max model
-	model := "glm-4.7"
+	model := "glm-4.6"
 
 	// Test 1: Simple completion
-	fmt.Printf("\nTesting simple completion with model: %s\n", model)
-	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model: model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: "Explain Go pointers in one sentence.",
-			},
-		},
-	})
+	// fmt.Printf("\nTesting simple completion with model: %s\n", model)
+	// resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+	// 	Model: model,
+	// 	Messages: []openai.ChatCompletionMessage{
+	// 		{
+	// 			Role:    openai.ChatMessageRoleUser,
+	// 			Content: "Explain Go pointers in one sentence.",
+	// 		},
+	// 	},
+	// })
 
-	if err != nil {
-		log.Printf("Chat completion failed: %v", err)
-		return
-	}
+	// if err != nil {
+	// 	log.Printf("Chat completion failed: %v", err)
+	// 	return
+	// }
 
-	if len(resp.Choices) > 0 {
-		fmt.Printf("Response: %s\n", resp.Choices[0].Message.Content)
-	}
+	// if len(resp.Choices) > 0 {
+	// 	fmt.Printf("Response: %s\n", resp.Choices[0].Message.Content)
+	// }
 
 	// Test 2: Streaming completion
 	fmt.Printf("\nTesting streaming completion with model: %s\n", model)
@@ -96,29 +96,29 @@ func main() {
 		if len(resp.Choices) > 0 {
 			fmt.Print(resp.Choices[0].Delta.Content)
 		}
-		fmt.Println("\nDone.")
+		// fmt.Println("\nDone.")
 	}
 
-	// Test 3: Code generation
-	fmt.Printf("\nTesting code generation with model: %s\n", model)
-	codeResp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model: model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: "Write a Go function that implements binary search for a sorted slice of integers.",
-			},
-		},
-	})
+	// // Test 3: Code generation
+	// fmt.Printf("\nTesting code generation with model: %s\n", model)
+	// codeResp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+	// 	Model: model,
+	// 	Messages: []openai.ChatCompletionMessage{
+	// 		{
+	// 			Role:    openai.ChatMessageRoleUser,
+	// 			Content: "Write a Go function that implements binary search for a sorted slice of integers.",
+	// 		},
+	// 	},
+	// })
 
-	if err != nil {
-		log.Printf("Code generation failed: %v", err)
-		return
-	}
+	// if err != nil {
+	// 	log.Printf("Code generation failed: %v", err)
+	// 	return
+	// }
 
-	if len(codeResp.Choices) > 0 {
-		fmt.Printf("Generated Code:\n%s\n", codeResp.Choices[0].Message.Content)
-	}
+	// if len(codeResp.Choices) > 0 {
+	// 	fmt.Printf("Generated Code:\n%s\n", codeResp.Choices[0].Message.Content)
+	// }
 
 	fmt.Println("\n=== All tests completed ===")
 }

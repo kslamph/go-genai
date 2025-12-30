@@ -334,11 +334,11 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 		}
 	}
 
-	client := p.GetClient()
 	logProviderRequest(p.Name(), string(p.Type()), modelName, r.URL.Path, r.UserAgent(), false)
 
 	// Add retry loop for 401 errors
 	for attempt := 0; attempt < 2; attempt++ {
+		client := p.GetClient()
 		resp, err := client.Models.GenerateContent(r.Context(), modelName, req.toGenAIContents(), finalConfig)
 		if err != nil {
 			errStr := err.Error()
@@ -355,11 +355,19 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 				case provider.ProviderGemini:
 					if geminiProv, ok := p.(*gemini.GeminiProvider); ok {
 						refreshErr = geminiProv.GetAuth().ForceRefresh(r.Context())
+						if refreshErr == nil {
+							// Refresh the genai.Client to pick up the new token
+							_, refreshErr = geminiProv.RefreshClient(r.Context())
+						}
 					}
 				case provider.ProviderAntigravity:
 					if antigravityProv, ok := p.(*antigravity.AntigravityProvider); ok {
 						if antigravityProv.GetAuth() != nil {
 							refreshErr = antigravityProv.GetAuth().ForceRefresh(r.Context())
+							if refreshErr == nil {
+								// Refresh the genai.Client to pick up the new token
+								_, refreshErr = antigravityProv.RefreshClient(r.Context())
+							}
 						}
 					}
 				}
@@ -473,8 +481,6 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 		}
 	}
 
-	client := p.GetClient()
-
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -490,6 +496,7 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 
 	// Add retry loop for 401 errors (only before any chunks are sent)
 	for attempt := 0; attempt < 2; attempt++ {
+		client := p.GetClient()
 		iter := client.Models.GenerateContentStream(r.Context(), modelName, req.toGenAIContents(), finalConfig)
 
 		chunkCount := 0
@@ -512,11 +519,19 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 					case provider.ProviderGemini:
 						if geminiProv, ok := p.(*gemini.GeminiProvider); ok {
 							refreshErr = geminiProv.GetAuth().ForceRefresh(r.Context())
+							if refreshErr == nil {
+								// Refresh the genai.Client to pick up the new token
+								_, refreshErr = geminiProv.RefreshClient(r.Context())
+							}
 						}
 					case provider.ProviderAntigravity:
 						if antigravityProv, ok := p.(*antigravity.AntigravityProvider); ok {
 							if antigravityProv.GetAuth() != nil {
 								refreshErr = antigravityProv.GetAuth().ForceRefresh(r.Context())
+								if refreshErr == nil {
+									// Refresh the genai.Client to pick up the new token
+									_, refreshErr = antigravityProv.RefreshClient(r.Context())
+								}
 							}
 						}
 					}

@@ -10,6 +10,7 @@ import (
 
 	cloudauth "cloud.google.com/go/auth"
 	"github.com/sunbankio/omniproxy/internal/provider"
+	"github.com/sunbankio/omniproxy/pkg/utils"
 	"google.golang.org/genai"
 )
 
@@ -71,6 +72,41 @@ func (p *GeminiProvider) GetClient() *genai.Client {
 
 func (p *GeminiProvider) GetAuth() *Authenticator {
 	return p.auth
+}
+
+// RefreshClient recreates the genai.Client with fresh credentials after token refresh
+// This is necessary because genai.Client caches tokens internally and doesn't automatically pick up refreshed tokens
+func (p *GeminiProvider) RefreshClient(ctx context.Context) (*genai.Client, error) {
+	// Discover Project ID (it shouldn't change, but we need it for the new client)
+	projectID, err := discoverProjectID(ctx, p.auth, CloudCodeBaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover project ID during client refresh: %w", err)
+	}
+
+	// Create new TokenProvider with the refreshed authenticator
+	tokenProvider := &TokenProvider{authenticator: p.auth}
+	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
+		TokenProvider: tokenProvider,
+	})
+
+	// Create new genai.Client with fresh credentials
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		Backend:     genai.BackendGeminiCLI,
+		Project:     projectID,
+		Credentials: creds,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create new genai client during refresh: %w", err)
+	}
+
+	// Update the client reference
+	p.client = client
+
+	utils.L().Infow("Successfully refreshed genai client",
+		"provider", p.name,
+		"project_id", projectID)
+
+	return p.client, nil
 }
 
 func (p *GeminiProvider) ListModels(ctx context.Context) ([]string, error) {

@@ -193,6 +193,56 @@ func (p *AntigravityProvider) GetAuth() *Authenticator {
 	return p.auth
 }
 
+// RefreshClient recreates the genai.Client with fresh credentials after token refresh
+// This is necessary because genai.Client caches tokens internally and doesn't automatically pick up refreshed tokens
+func (p *AntigravityProvider) RefreshClient(ctx context.Context) (*genai.Client, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Get Project ID (use stored or discover)
+	projectID := p.auth.GetProjectID()
+	if projectID == "" {
+		discoveredID, err := discoverProjectIDWithAuth(ctx, p.auth, AntigravityBaseURL)
+		if err != nil {
+			// Fallback as seen in POC
+			utils.L().Warnw("Failed to discover project ID during client refresh, using fallback",
+				"provider", p.name,
+				"error", err)
+			projectID = "antigravity-test-project"
+		} else {
+			projectID = discoveredID
+		}
+	}
+
+	// Create new TokenProvider with the refreshed authenticator
+	tokenProvider := &TokenProvider{authenticator: p.auth}
+	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
+		TokenProvider: tokenProvider,
+	})
+
+	// Create new genai.Client with fresh credentials
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		Backend:     genai.BackendAntigravity,
+		Project:     projectID,
+		Credentials: creds,
+		HTTPOptions: genai.HTTPOptions{
+			BaseURL: AntigravityBaseURL,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create new genai client during refresh: %w", err)
+	}
+
+	// Update the client reference
+	p.client = client
+
+	utils.L().Infow("Successfully refreshed genai client",
+		"provider", p.name,
+		"project_id", projectID)
+
+	return p.client, nil
+}
+
 func (p *AntigravityProvider) getProjectID() string {
 	if p.auth != nil {
 		return p.auth.GetProjectID()

@@ -77,4 +77,8 @@ type GeminiNativeProvider interface {
 
 	// GetClient returns the underlying genai.Client for native protocol access
 	GetClient() *genai.Client
+
+	// RefreshClient recreates the genai.Client with fresh credentials after token refresh
+	// This is necessary because genai.Client caches tokens internally and doesn't automatically pick up refreshed tokens
+	RefreshClient(ctx context.Context) (*genai.Client, error)
 }
