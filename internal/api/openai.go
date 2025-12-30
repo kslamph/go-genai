@@ -142,15 +142,12 @@ func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, selectionReason, err := s.ps.GetOpenAIProviderByModelWithReason(req.Model)
+	p, _, err := s.ps.GetOpenAIProviderByModelWithReason(req.Model)
 	if err != nil {
 		utils.L().Errorf("Failed to find OpenAI-compatible provider for model %s: %v", req.Model, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-
-	// Log provider selection with detailed reasoning
-	utils.L().Infof("Model '%s' -> Provider: %s (type: %s) - Reason: %s", req.Model, p.Name(), p.Type(), selectionReason)
 
 	s.executeChat(w, r, p, req)
 }
