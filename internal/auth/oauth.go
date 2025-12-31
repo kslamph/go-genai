@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"time"
 
 	cloudauth "cloud.google.com/go/auth"
 )
@@ -39,45 +38,4 @@ func (tpa *TokenProviderAdapter) Token(ctx context.Context) (*cloudauth.Token, e
 		Value:  accessToken,
 		Expiry: expiry,
 	}, nil
-}
-
-// OAuthTokenProvider is a generic interface for token providers that can be used across different OAuth implementations
-type OAuthTokenProvider interface {
-	GetToken(ctx context.Context) (string, error)
-	ForceRefresh(ctx context.Context) error
-	IsAuthenticated() bool
-	IsValid() bool
-}
-
-// GenericOAuthConfig holds common OAuth configuration
-type GenericOAuthConfig struct {
-	ClientID     string
-	ClientSecret string
-	Scope        string
-	TokenURL     string
-	AuthURL      string
-	RedirectPort int
-	CredsPath    string
-}
-
-// OAuthHelper provides common OAuth utilities
-type OAuthHelper struct {
-	config *GenericOAuthConfig
-}
-
-// NewOAuthHelper creates a new OAuthHelper
-func NewOAuthHelper(config *GenericOAuthConfig) *OAuthHelper {
-	return &OAuthHelper{
-		config: config,
-	}
-}
-
-// IsTokenExpiringSoon checks if a token is expiring within the specified duration
-func IsTokenExpiringSoon(expiry time.Time, buffer time.Duration) bool {
-	return time.Until(expiry) < buffer
-}
-
-// DefaultTokenRefreshBuffer returns the default 30-minute buffer for token refresh
-func DefaultTokenRefreshBuffer() time.Duration {
-	return 30 * time.Minute
 }

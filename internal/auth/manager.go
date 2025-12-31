@@ -135,9 +135,9 @@ func (m *Manager) RefreshClient(ctx context.Context, cred *Credential) error {
 	case ProviderTypeGemini:
 		return m.refreshGeminiClient(ctx, cred)
 	case ProviderTypeIFlow:
-		return m.refreshIFlowClient(ctx, cred)
+		return m.refreshIFlowClient(cred)
 	case ProviderTypeQwen:
-		return m.refreshQwenClient(ctx, cred)
+		return m.refreshQwenClient(cred)
 	case ProviderTypeAntigravity:
 		return m.refreshAntigravityClient(ctx, cred)
 	case ProviderTypeOpenAI:
@@ -327,7 +327,7 @@ func (m *Manager) refreshGeminiClient(ctx context.Context, cred *Credential) err
 	return nil
 }
 
-func (m *Manager) refreshIFlowClient(ctx context.Context, cred *Credential) error {
+func (m *Manager) refreshIFlowClient(cred *Credential) error {
 	// iFlow uses OpenAI-compatible client with TokenTransport
 	// The TokenTransport automatically picks up the refreshed token from the credential
 	// No explicit client refresh needed
@@ -336,7 +336,7 @@ func (m *Manager) refreshIFlowClient(ctx context.Context, cred *Credential) erro
 	return nil
 }
 
-func (m *Manager) refreshQwenClient(ctx context.Context, cred *Credential) error {
+func (m *Manager) refreshQwenClient(cred *Credential) error {
 	// Qwen uses OpenAI-compatible client with TokenTransport
 	// The TokenTransport automatically picks up the refreshed token from the credential
 	// No explicit client refresh needed

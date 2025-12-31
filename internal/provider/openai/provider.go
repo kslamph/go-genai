@@ -64,11 +64,16 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 		defer stream.Close()
 
 		for {
-			response, err := stream.Recv()
-			if err != nil {
+			select {
+			case <-ctx.Done():
 				return
+			default:
+				response, err := stream.Recv()
+				if err != nil {
+					return
+				}
+				respChan <- response
 			}
-			respChan <- response
 		}
 	}()
 

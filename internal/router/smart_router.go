@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sashabaranov/go-openai"
@@ -104,94 +105,65 @@ const (
 	MaxRetries = 3
 )
 
-// Execute executes a request with intelligent retry and failover logic
+// Execute executes a request without retries - clients handle error retry logic
 func (r *SmartRouter) Execute(ctx context.Context, req *Request) (*Response, error) {
-	var lastErr error
+	// Get candidate credential based on protocol and model
+	cred, err := r.selectCredential(req)
+	if err != nil {
+		return nil, err
+	}
 
-	for retry := 0; retry < MaxRetries; retry++ {
-		// Get candidate credential based on protocol and model
-		cred, err := r.selectCredential(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		// Ensure we have a valid token (lazy check)
-		// Skip this check if the credential has a provider instance, as the provider handles its own authentication
-		if cred.GetProvider() == nil {
-			if err := r.authManager.EnsureValidToken(ctx, cred); err != nil {
-				// Mark credential as having issues and try next
-				r.handleCredentialError(cred, err)
-				lastErr = err
-				continue
-			}
-		}
-
-		// Execute the request with the selected credential
-		resp, err := r.executeWithCredential(ctx, cred, req)
-		if err == nil {
-			// Success - record it and return
-			r.loadBalancer.RecordSuccess(req.Model, cred)
-			r.penaltyBox.RemoveFromPenaltyBox(cred.ID)
-			return resp, nil
-		}
-
-		// Handle error cases
-		if providerErr, ok := err.(*provider.ProviderError); ok {
-			switch providerErr.StatusCode {
-			case http.StatusUnauthorized: // 401
-				// Force refresh and retry once
-				if refreshErr := r.authManager.ForceRefresh(ctx, cred); refreshErr != nil {
-					r.handleCredentialError(cred, refreshErr)
-					lastErr = refreshErr
-					continue
-				}
-
-				// For genai-based providers, refresh the client to pick up new token
-				// This is critical because genai.Client caches tokens internally
-				if cred.ProviderType == auth.ProviderTypeGemini || cred.ProviderType == auth.ProviderTypeAntigravity {
-					if clientRefreshErr := r.authManager.RefreshClient(ctx, cred); clientRefreshErr != nil {
-						r.handleCredentialError(cred, clientRefreshErr)
-						lastErr = clientRefreshErr
-						continue
-					}
-				}
-
-				// Retry with refreshed credential
-				resp, retryErr := r.executeWithCredential(ctx, cred, req)
-				if retryErr == nil {
-					r.loadBalancer.RecordSuccess(req.Model, cred)
-					r.penaltyBox.RemoveFromPenaltyBox(cred.ID)
-					return resp, nil
-				}
-				r.handleCredentialError(cred, retryErr)
-				lastErr = retryErr
-
-			case http.StatusTooManyRequests: // 429
-				// Add to penalty box and try next credential
-				failureCount := r.penaltyBox.GetFailureCount(cred.ID) + 1
-				r.penaltyBox.AddToPenaltyBox(cred.ID, failureCount)
-				r.loadBalancer.RecordFailure(cred)
-				lastErr = err
-
-			default:
-				// For 5xx and other errors, retry with next credential
-				if providerErr.StatusCode >= 500 {
-					r.loadBalancer.RecordFailure(cred)
-					lastErr = err
-				} else {
-					// For 4xx (except 401/429), don't retry - this is likely a client error
-					return nil, err
-				}
-			}
-		} else {
-			// Non-provider errors, treat as failure and retry
-			r.loadBalancer.RecordFailure(cred)
-			lastErr = err
+	// Ensure we have a valid token (lazy check)
+	// Skip this check if the credential has a provider instance, as the provider handles its own authentication
+	if cred.GetProvider() == nil {
+		if err := r.authManager.EnsureValidToken(ctx, cred); err != nil {
+			// Mark credential as having issues and return error
+			r.handleCredentialError(cred, err)
+			return nil, err
 		}
 	}
 
-	return nil, fmt.Errorf("all retries exhausted. last error: %w", lastErr)
+	// Execute the request with the selected credential
+	resp, err := r.executeWithCredential(ctx, cred, req)
+	if err == nil {
+		// Success - record it and return
+		r.loadBalancer.RecordSuccess(req.Model, cred)
+		r.penaltyBox.RemoveFromPenaltyBox(cred.ID)
+		return resp, nil
+	}
+
+	// Handle error cases - record and return without retrying
+	if providerErr, ok := err.(*provider.ProviderError); ok {
+		switch providerErr.StatusCode {
+		case http.StatusUnauthorized: // 401
+			// Force refresh and return error - client will retry
+			if refreshErr := r.authManager.ForceRefresh(ctx, cred); refreshErr != nil {
+				r.handleCredentialError(cred, refreshErr)
+			}
+
+			// For genai-based providers, refresh the client to pick up new token
+			if cred.ProviderType == auth.ProviderTypeGemini || cred.ProviderType == auth.ProviderTypeAntigravity {
+				r.authManager.RefreshClient(ctx, cred)
+			}
+
+		case http.StatusTooManyRequests: // 429
+			// Add to penalty box and return error - client will retry
+			failureCount := r.penaltyBox.GetFailureCount(cred.ID) + 1
+			r.penaltyBox.AddToPenaltyBox(cred.ID, failureCount)
+			r.loadBalancer.RecordFailure(cred)
+
+		default:
+			// For 5xx and other errors, record failure and return error - client will retry
+			if providerErr.StatusCode >= 500 {
+				r.loadBalancer.RecordFailure(cred)
+			}
+		}
+	} else {
+		// Non-provider errors, record failure and return error
+		r.loadBalancer.RecordFailure(cred)
+	}
+
+	return nil, err
 }
 
 // selectCredential selects the best credential for the request
@@ -780,12 +752,56 @@ func (r *SmartRouter) executeGeminiStream(ctx context.Context, cred *auth.Creden
 		}()
 
 		chunkCount := 0
+		firstItemChecked := false
+
 		for resp, err := range iter {
+			select {
+			case <-ctx.Done():
+				// Client disconnected, clean up
+				utils.L().Infow("Client disconnected during Gemini streaming", "model", modelName, "provider", string(cred.Type()), "provider_name", cred.Name())
+				return
+			default:
+			}
+
+			if !firstItemChecked {
+				firstItemChecked = true
+				if err != nil {
+					// First item is an error - send error response and close
+					utils.L().Errorw("Gemini stream error on first item", "model", modelName, "error", err, "provider", string(cred.Type()), "provider_name", cred.Name())
+
+					// Parse error to determine status code
+					statusCode := http.StatusInternalServerError
+					errMsg := err.Error()
+
+					if strings.Contains(errMsg, "429") || strings.Contains(errMsg, "RESOURCE_EXHAUSTED") || strings.Contains(errMsg, "RATE_LIMIT_EXCEEDED") {
+						statusCode = http.StatusTooManyRequests
+					} else if strings.Contains(errMsg, "401") || strings.Contains(errMsg, "UNAUTHENTICATED") {
+						statusCode = http.StatusUnauthorized
+					} else if strings.Contains(errMsg, "403") || strings.Contains(errMsg, "PERMISSION_DENIED") {
+						statusCode = http.StatusForbidden
+					}
+
+					// Create JSON error response
+					errorResp := map[string]interface{}{
+						"error": map[string]interface{}{
+							"code":    statusCode,
+							"message": errMsg,
+							"status":  http.StatusText(statusCode),
+						},
+					}
+					errorBody, _ := json.Marshal(errorResp)
+
+					// Write error as a single SSE event
+					pw.Write([]byte(fmt.Sprintf("data: %s\n\n", string(errorBody))))
+					return
+				}
+			}
+
 			if err != nil {
-				// Stream ended or error occurred
+				// Stream ended or error occurred (after first item)
 				if err.Error() != "EOF" {
-					// This is an actual error
-					utils.L().Errorw("Gemini stream error", "model", modelName, "error", err, "provider", string(cred.Type()), "provider_name", cred.Name())
+					// This is an actual error mid-stream
+					utils.L().Errorw("Gemini stream error mid-stream", "model", modelName, "error", err, "provider", string(cred.Type()), "provider_name", cred.Name())
 					return
 				}
 				// Stream completed normally

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -69,34 +68,11 @@ func (s *Server) writeModelsResponse(w http.ResponseWriter, modelNames []string)
 }
 
 func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
-	// Log incoming request details to help debug duplicate requests
-	utils.L().Infow("Incoming chat completion request",
-		"method", r.Method,
-		"path", r.URL.Path,
-		"query", r.URL.RawQuery,
-		"content_length", r.ContentLength,
-		"remote_addr", r.RemoteAddr,
-		"user_agent", r.UserAgent())
-
-	// Read the raw body for logging
+	// Read the request body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
 		return
-	}
-
-	// Log the raw request body (debug only)
-	utils.L().Debugw("Raw HTTP request body", "body", string(bodyBytes))
-
-	// Save raw request to file for inspection (debug mode only)
-	if utils.IsDebugMode() {
-		timestamp := time.Now().Format("20060102-150405.000")
-		filename := fmt.Sprintf("request-%s.json", timestamp)
-		if err := os.WriteFile(filename, bodyBytes, 0644); err != nil {
-			utils.L().Warnw("Failed to write request to file", "error", err, "filename", filename)
-		} else {
-			utils.L().Infow("Saved request to file", "filename", filename)
-		}
 	}
 
 	// Restore the body for decoding
@@ -257,47 +233,6 @@ func (s *Server) HandleProviderChat(w http.ResponseWriter, r *http.Request) {
 	resp.Body.Close()
 }
 
-func (s *Server) executeChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {
-	if req.Stream {
-		s.streamChat(w, r, p, req)
-	} else {
-		s.normalChat(w, r, p, req)
-	}
-}
-
-func (s *Server) normalChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {
-	logProviderRequest(p.Name(), string(p.Type()), req.Model, r.URL.Path, r.UserAgent(), false)
-
-	resp, err := p.ChatCompletion(r.Context(), req)
-	if err != nil {
-		logProviderError(p.Name(), string(p.Type()), req.Model, false, err)
-		s.ps.RecordFailure(p) // Record failure for load balancing
-		s.writeErrorResponse(w, err)
-		return
-	}
-
-	s.ps.RecordSuccess(req.Model, p)
-
-	// Save response to file for inspection (debug mode only)
-	if utils.IsDebugMode() {
-		respBytes, err := json.MarshalIndent(resp, "", "  ")
-		if err == nil {
-			timestamp := time.Now().Format("20060102-150405.000")
-			filename := fmt.Sprintf("response-%s.json", timestamp)
-			if err := os.WriteFile(filename, respBytes, 0644); err != nil {
-				utils.L().Warnw("Failed to write response to file", "error", err, "filename", filename)
-			} else {
-				utils.L().Infow("Saved response to file", "filename", filename)
-			}
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		utils.L().Errorf("Failed to encode response: %v", err)
-	}
-}
-
 // writeErrorResponse writes an error response with proper status code
 func (s *Server) writeErrorResponse(w http.ResponseWriter, err error) {
 	// Check if it's a ProviderError with status code
@@ -328,44 +263,3 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
-func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {
-	logProviderRequest(p.Name(), string(p.Type()), req.Model, r.URL.Path, r.UserAgent(), true)
-
-	respChan, errChan := p.StreamChatCompletion(r.Context(), req)
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Transfer-Encoding", "chunked")
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case err := <-errChan:
-			if err != nil {
-				logProviderError(p.Name(), string(p.Type()), req.Model, true, err)
-				s.ps.RecordFailure(p) // Record failure for load balancing
-				// SSE error handling is tricky, often just closing is best if started
-			}
-			return
-		case resp, ok := <-respChan:
-			if !ok {
-				// Success record after stream finishes successfully
-				s.ps.RecordSuccess(req.Model, p)
-				_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
-				flusher.Flush()
-				return
-			}
-			data, _ := json.Marshal(resp)
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", string(data))
-			flusher.Flush()
-		}
-	}
-}

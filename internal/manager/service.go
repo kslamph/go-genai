@@ -3,147 +3,26 @@ package manager
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/sunbankio/omniproxy/internal/auth"
 	"github.com/sunbankio/omniproxy/internal/provider"
-	"github.com/sunbankio/omniproxy/pkg/utils"
 )
 
 // ProviderService is a facade that coordinates provider operations
 type ProviderService struct {
-	registry         *ProviderRegistry
-	loadBalancer     *LoadBalancer
-	rateLimitTracker *RateLimitTracker
+	registry     *ProviderRegistry
+	loadBalancer *LoadBalancer
 }
 
 // NewProviderService creates a new ProviderService
 func NewProviderService(
 	registry *ProviderRegistry,
 	loadBalancer *LoadBalancer,
-	rateLimitTracker *RateLimitTracker,
 ) *ProviderService {
 	return &ProviderService{
-		registry:         registry,
-		loadBalancer:     loadBalancer,
-		rateLimitTracker: rateLimitTracker,
+		registry:     registry,
+		loadBalancer: loadBalancer,
 	}
-}
-
-// GetOpenAIProvider returns an OpenAI-compatible provider for the given type and model
-func (ps *ProviderService) GetOpenAIProvider(providerType provider.ProviderType, model string) (provider.OpenAICompatibleProvider, error) {
-	p, _, err := ps.GetOpenAIProviderWithReason(providerType, model)
-	return p, err
-}
-
-// GetOpenAIProviderWithReason returns an OpenAI-compatible provider with selection reason
-func (ps *ProviderService) GetOpenAIProviderWithReason(providerType provider.ProviderType, model string) (provider.OpenAICompatibleProvider, string, error) {
-	// Check if last successful provider for this model matches the type and is OpenAI-compatible
-	last := ps.loadBalancer.GetLastSuccess(model)
-	if last != nil {
-		if openaiProvider, ok := last.(provider.OpenAICompatibleProvider); ok && openaiProvider.Type() == providerType {
-			return openaiProvider, "last success", nil
-		}
-	}
-
-	// Otherwise, select using smart round-robin with failure tracking
-	// Access the pool directly
-	pool := ps.registry.GetPool(providerType)
-	if pool == nil || pool.Size() == 0 {
-		return nil, "", fmt.Errorf("no OpenAI-compatible providers available for type: %s", providerType)
-	}
-
-	credentials := pool.List()
-	// Convert credentials to BaseProvider interface slice
-	candidates := make([]provider.BaseProvider, len(credentials))
-	for i, cred := range credentials {
-		candidates[i] = cred
-	}
-
-	selected := ps.loadBalancer.SelectRoundRobin(candidates, providerType)
-	if selected == nil {
-		return nil, "", fmt.Errorf("failed to select provider from pool: %s", providerType)
-	}
-
-	if openaiProvider, ok := selected.(provider.OpenAICompatibleProvider); ok {
-		return openaiProvider, "round-robin", nil
-	}
-
-	return nil, "", fmt.Errorf("selected provider is not OpenAI-compatible")
-}
-
-// GetOpenAIProviderByModel finds an OpenAI-compatible provider by model name
-func (ps *ProviderService) GetOpenAIProviderByModel(model string) (provider.OpenAICompatibleProvider, error) {
-	p, _, err := ps.GetOpenAIProviderByModelWithReason(model)
-	return p, err
-}
-
-// GetOpenAIProviderByModelWithReason finds an OpenAI-compatible provider by model name with reason
-func (ps *ProviderService) GetOpenAIProviderByModelWithReason(model string) (provider.OpenAICompatibleProvider, string, error) {
-	// Check if last successful provider still supports this model and is OpenAI-compatible
-	last := ps.loadBalancer.GetLastSuccess(model)
-	if last != nil {
-		if openaiProvider, ok := last.(provider.OpenAICompatibleProvider); ok && openaiProvider.SupportsModel(model) {
-			return openaiProvider, "last success", nil
-		}
-	}
-
-	// Find all OpenAI-compatible providers that support this model
-	var candidates []provider.BaseProvider
-
-	// Iterate through all pools
-	pools := ps.registry.GetPools()
-	for _, pool := range pools {
-		credentials := pool.List()
-		for _, cred := range credentials {
-			// Check if this credential is for an OpenAI-compatible provider
-			if cred.ProviderType == auth.ProviderTypeOpenAI || cred.ProviderType == auth.ProviderTypeQwen || cred.ProviderType == auth.ProviderTypeIFlow {
-				if cred.SupportsModel(model) {
-					candidates = append(candidates, cred)
-				}
-			}
-		}
-	}
-
-	if len(candidates) == 0 {
-		return nil, "", fmt.Errorf("no OpenAI-compatible providers found for model: %s", model)
-	}
-
-	// Use smart selection with failure tracking
-	// For model-based selection, we use a special pool key
-	selected := ps.loadBalancer.SelectRoundRobin(candidates, provider.ProviderType("model:"+model))
-	if selected == nil {
-		return nil, "", fmt.Errorf("failed to select provider for model: %s", model)
-	}
-
-	return selected.(provider.OpenAICompatibleProvider), "round-robin", nil
-}
-
-// GetGeminiProvider returns a Gemini-native provider for the given type and model
-func (ps *ProviderService) GetGeminiProvider(providerType provider.ProviderType, model string) (provider.GeminiNativeProvider, error) {
-	pool := ps.registry.GetPool(providerType)
-	if pool == nil || pool.Size() == 0 {
-		return nil, fmt.Errorf("no Gemini-native providers available for type: %s", providerType)
-	}
-
-	credentials := pool.List()
-	// Convert credentials to BaseProvider interface slice
-	candidates := make([]provider.BaseProvider, len(credentials))
-	for i, cred := range credentials {
-		candidates[i] = cred
-	}
-
-	// Select provider based on rate limit rejection time
-	selected := ps.loadBalancer.SelectLeastRecentlyRejected(candidates, model, ps.rateLimitTracker)
-	if selected == nil {
-		return nil, fmt.Errorf("failed to select Gemini provider from pool: %s", providerType)
-	}
-
-	if geminiProvider, ok := selected.(provider.GeminiNativeProvider); ok {
-		return geminiProvider, nil
-	}
-
-	return nil, fmt.Errorf("selected provider is not Gemini-native")
 }
 
 // RecordSuccess records a successful request for a model
@@ -154,16 +33,6 @@ func (ps *ProviderService) RecordSuccess(model string, p provider.BaseProvider) 
 // RecordFailure records a failed request for a provider
 func (ps *ProviderService) RecordFailure(p provider.BaseProvider) {
 	ps.loadBalancer.RecordFailure(p)
-}
-
-// RecordRateLimitReject records a 429 rate limit rejection for a specific provider-model combination
-func (ps *ProviderService) RecordRateLimitReject(providerName string, model string) {
-	ps.rateLimitTracker.RecordRateLimitReject(providerName, model)
-}
-
-// RecordQuotaExhausted records a 429 quota exhaustion with explicit reset time for a specific provider-model combination
-func (ps *ProviderService) RecordQuotaExhausted(providerName string, model string, resetTime time.Time) {
-	ps.rateLimitTracker.RecordQuotaExhausted(providerName, model, resetTime)
 }
 
 // ListModels returns a list of all models from OpenAI-compatible providers
@@ -252,46 +121,6 @@ func (ps *ProviderService) ListGeminiModels(ctx context.Context) ([]string, erro
 		}
 	}
 	return models, nil
-}
-
-// GetAnyGeminiProviderByModel finds any Gemini provider that supports the given model
-func (ps *ProviderService) GetAnyGeminiProviderByModel(model string) (provider.GeminiNativeProvider, error) {
-	// Collect all providers that support this model
-	var candidates []provider.BaseProvider
-
-	pools := ps.registry.GetPools()
-	for _, pool := range pools {
-		credentials := pool.List()
-		for _, cred := range credentials {
-			// Check if this is a Gemini-native provider
-			if cred.ProviderType == auth.ProviderTypeGemini || cred.ProviderType == auth.ProviderTypeAntigravity {
-				if cred.SupportsModel(model) {
-					candidates = append(candidates, cred)
-				}
-			}
-		}
-	}
-
-	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no Gemini providers found for model: %s", model)
-	}
-
-	// Select the best candidate based on rate limit tracking
-	selected := ps.loadBalancer.SelectLeastRecentlyRejected(candidates, model, ps.rateLimitTracker)
-	if selected == nil {
-		return nil, fmt.Errorf("failed to select Gemini provider for model: %s", model)
-	}
-
-	return selected.(provider.GeminiNativeProvider), nil
-}
-
-// RemoveInvalidProvider removes a provider from the registry when its credentials are invalid/revoked
-func (ps *ProviderService) RemoveInvalidProvider(p provider.BaseProvider) {
-	utils.L().Infow("Removing invalid provider from registry",
-		"provider", p.Name(),
-		"provider_type", p.Type())
-
-	ps.registry.RemoveProvider(p)
 }
 
 // GetRegistry returns the provider registry

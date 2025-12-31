@@ -32,27 +32,6 @@ func NewServer(ps *manager.ProviderService, authMgr auth.AuthManager) *Server {
 	return s
 }
 
-// logProviderRequest logs the start of a provider request in a unified format
-func logProviderRequest(providerName, providerType, model, path, userAgent string, isStream bool) {
-	utils.L().Infow("PROCESSING",
-		"provider", providerName,
-		"provider_type", providerType,
-		"model", model,
-		"stream", isStream,
-		"path", path,
-		"user_agent", userAgent)
-}
-
-// logProviderError logs a provider error in a unified format
-func logProviderError(providerName, providerType, model string, isStream bool, err error) {
-	utils.L().Errorw("Provider request failed",
-		"provider", providerName,
-		"provider_type", providerType,
-		"model", model,
-		"stream", isStream,
-		"error", err)
-}
-
 func (s *Server) setupRoutes() {
 	s.router.Use(middleware.RequestID)
 	s.router.Use(middleware.RealIP)

@@ -11,16 +11,15 @@ func NewProviderServiceManager(ctx context.Context, cfg *config.Config) (*Provid
 	// Create the new components
 	registry := NewProviderRegistry()
 	loadBalancer := NewLoadBalancer()
-	rateLimitTracker := NewRateLimitTracker()
-	
+
 	// Create the service
-	service := NewProviderService(registry, loadBalancer, rateLimitTracker)
-	
+	service := NewProviderService(registry, loadBalancer)
+
 	// Initialize providers and register them using the factory
 	factory := NewProviderFactory()
 	if err := factory.InitializeAllProviders(ctx, cfg, registry); err != nil {
 		return nil, err
 	}
-	
+
 	return service, nil
 }

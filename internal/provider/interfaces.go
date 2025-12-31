@@ -43,7 +43,7 @@ const (
 
 // BaseProvider is the common interface for all providers
 type BaseProvider interface {
-	// Type returns the provider identifier (e.g., "gemini", "kiro", "iflow")
+	// Type returns the provider identifier (e.g., "gemini", "qwen", "iflow")
 	Type() ProviderType
 
 	// Name returns the unique name/ID of this specific instance/credential

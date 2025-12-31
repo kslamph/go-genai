@@ -9,17 +9,13 @@ import (
 )
 
 var (
-	logger    *zap.SugaredLogger
-	once      sync.Once
-	debugMode bool
-	debugFile *os.File
+	logger *zap.SugaredLogger
+	once   sync.Once
 )
 
 // InitLogger initializes the global zap logger
-func InitLogger(level string, enableDebugFile bool) {
+func InitLogger(level string) {
 	once.Do(func() {
-		debugMode = enableDebugFile
-
 		atomicLevel := zap.NewAtomicLevel()
 		switch level {
 		case "debug":
@@ -38,40 +34,14 @@ func InitLogger(level string, enableDebugFile bool) {
 		encoderConfig.TimeKey = "timestamp"
 		encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 
-		var cores []zapcore.Core
-
-		// Console output for info and above (excludes debug)
-		consoleLevel := zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
-			return lvl >= zapcore.InfoLevel && atomicLevel.Enabled(lvl)
-		})
+		// Console output for all logs
 		consoleCore := zapcore.NewCore(
 			zapcore.NewConsoleEncoder(encoderConfig),
 			zapcore.AddSync(os.Stdout),
-			consoleLevel,
+			atomicLevel,
 		)
-		cores = append(cores, consoleCore)
 
-		// If debug mode is enabled, write debug logs to server.log
-		if debugMode && atomicLevel.Level() == zap.DebugLevel {
-			var err error
-			debugFile, err = os.OpenFile("server.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-			if err != nil {
-				// Fallback: if we can't open the file, just log to console
-				os.Stderr.WriteString("Warning: Could not open server.log for debug logging: " + err.Error() + "\n")
-			} else {
-				debugLevel := zap.LevelEnablerFunc(func(lvl zapcore.Level) bool {
-					return lvl == zapcore.DebugLevel
-				})
-				debugCore := zapcore.NewCore(
-					zapcore.NewConsoleEncoder(encoderConfig),
-					zapcore.AddSync(debugFile),
-					debugLevel,
-				)
-				cores = append(cores, debugCore)
-			}
-		}
-
-		core := zapcore.NewTee(cores...)
+		core := zapcore.NewTee(consoleCore)
 		l := zap.New(core, zap.AddCaller())
 		logger = l.Sugar()
 	})
@@ -81,19 +51,12 @@ func InitLogger(level string, enableDebugFile bool) {
 func L() *zap.SugaredLogger {
 	if logger == nil {
 		// Fallback to a basic logger if InitLogger wasn't called
-		InitLogger("info", false)
+		InitLogger("info")
 	}
 	return logger
 }
 
-// CloseLogger closes the debug log file if it was opened
+// CloseLogger closes any open resources
 func CloseLogger() {
-	if debugFile != nil {
-		debugFile.Close()
-	}
-}
-
-// IsDebugMode returns whether debug mode is enabled
-func IsDebugMode() bool {
-	return debugMode
+	// No-op since we removed debug file logging
 }

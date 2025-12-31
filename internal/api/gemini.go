@@ -7,12 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/internal/router"
 	"github.com/sunbankio/omniproxy/pkg/utils"
@@ -139,68 +135,6 @@ func (r *GeminiRequest) toGenAIConfig() *genai.GenerateContentConfig {
 	return config
 }
 
-// extractQuotaResetTime extracts the quota reset time from a 429 error message
-// Returns the reset time if the error is QUOTA_EXHAUSTED, otherwise returns zero time
-func extractQuotaResetTime(err error) time.Time {
-	if err == nil {
-		return time.Time{}
-	}
-
-	errStr := err.Error()
-
-	// Check if this is a QUOTA_EXHAUSTED or RATE_LIMIT_EXCEEDED error
-	if !strings.Contains(errStr, "QUOTA_EXHAUSTED") && !strings.Contains(errStr, "RATE_LIMIT_EXCEEDED") {
-		return time.Time{}
-	}
-
-	// Format 1: "Your quota will reset after 4h53m59s." or "Your quota will reset after 49s."
-	if strings.Contains(errStr, "Your quota will reset after") {
-		parts := strings.Split(errStr, "Your quota will reset after")
-		if len(parts) > 1 {
-			resetPart := strings.TrimSpace(parts[1])
-			// Extract the duration (find the first period or comma as delimiter)
-			delimiters := []string{".", ",", "Status:"}
-			durationStr := resetPart
-			for _, delim := range delimiters {
-				if idx := strings.Index(resetPart, delim); idx > 0 {
-					durationStr = resetPart[:idx]
-					break
-				}
-			}
-			durationStr = strings.TrimSpace(durationStr)
-			// Parse the duration using Go's time.ParseDuration (supports 4h53m59s, 49s, etc.)
-			if duration, err := time.ParseDuration(durationStr); err == nil {
-				return time.Now().Add(duration)
-			}
-		}
-	}
-
-	// Format 2: "retryDelay:17639.032973961s" or "quotaResetDelay:4h53m59.032973961s"
-	// Extract from any *Delay: format
-	delayPatterns := []string{"retryDelay:", "quotaResetDelay:"}
-	for _, pattern := range delayPatterns {
-		if strings.Contains(errStr, pattern) {
-			parts := strings.Split(errStr, pattern)
-			if len(parts) > 1 {
-				delayStr := strings.TrimSpace(parts[1])
-				// Extract the duration (it should end with 's' or have a delimiter)
-				delimiters := []string{"s", " ", ",", "]", "}"}
-				for _, delim := range delimiters {
-					if idx := strings.Index(delayStr, delim); idx > 0 {
-						delayStr = delayStr[:idx] + "s" // Ensure it ends with 's' for ParseDuration
-						break
-					}
-				}
-				if duration, err := time.ParseDuration(delayStr); err == nil {
-					return time.Now().Add(duration)
-				}
-			}
-		}
-	}
-
-	return time.Time{}
-}
-
 func (r *GeminiRequest) toGenAIContents() []*genai.Content {
 	contents := make([]*genai.Content, len(r.Contents))
 	for i, c := range r.Contents {
@@ -287,7 +221,6 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 	// Parse the request
 	var req GeminiRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
-		s.dumpRequestIfDebug(r, bodyBytes, nil)
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -295,7 +228,6 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 
 	// Construct final GenerationConfig
 	finalConfig := req.toGenAIConfig()
-	s.dumpRequestIfDebug(r, bodyBytes, finalConfig)
 
 	// Validate request
 	if modelName == "" {
@@ -375,7 +307,6 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 	// Parse the request
 	var req GeminiRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
-		s.dumpRequestIfDebug(r, bodyBytes, nil)
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -383,7 +314,6 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 
 	// Construct final GenerationConfig
 	finalConfig := req.toGenAIConfig()
-	s.dumpRequestIfDebug(r, bodyBytes, finalConfig)
 
 	// Validate request
 	if modelName == "" {
@@ -496,109 +426,5 @@ func (s *Server) writeGeminiErrorResponse(w http.ResponseWriter, err error) {
 		utils.L().Errorf("Failed to encode Gemini error response: %v", err)
 	}
 }
-
-// cleanGeminiResponse removes internal SDK metadata from the response
-func cleanGeminiResponse(resp *genai.GenerateContentResponse) map[string]interface{} {
-	if resp == nil {
-		return map[string]interface{}{}
-	}
-
-	// Create a clean response without SDKHTTPResponse
-	result := map[string]interface{}{}
-
-	if resp.Candidates != nil {
-		candidates := make([]interface{}, 0, len(resp.Candidates))
-		for _, c := range resp.Candidates {
-			if c != nil {
-				candidates = append(candidates, c)
-			}
-		}
-		if len(candidates) > 0 {
-			result["candidates"] = candidates
-		}
-	}
-
-	if !resp.CreateTime.IsZero() {
-		result["createTime"] = resp.CreateTime.Format(time.RFC3339Nano)
-	}
-
-	if resp.ModelVersion != "" {
-		result["modelVersion"] = resp.ModelVersion
-	}
-
-	if resp.PromptFeedback != nil {
-		result["promptFeedback"] = resp.PromptFeedback
-	}
-
-	if resp.ResponseID != "" {
-		result["responseId"] = resp.ResponseID
-	}
-
-	if resp.UsageMetadata != nil {
-		result["usageMetadata"] = resp.UsageMetadata
-	}
-
-	return result
-}
-
-// cleanGeminiStreamResponse removes internal SDK metadata from streaming response
-func cleanGeminiStreamResponse(resp *genai.GenerateContentResponse) map[string]interface{} {
-	return cleanGeminiResponse(resp)
-}
-
-func (s *Server) getDebugDumpPath(r *http.Request) string {
-	reqID := middleware.GetReqID(r.Context())
-	if reqID == "" {
-		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	safeReqID := strings.ReplaceAll(reqID, "/", "_")
-	return fmt.Sprintf("debug_dumps/gemini_req_%s.log", safeReqID)
-}
-
-func (s *Server) dumpRequestIfDebug(r *http.Request, reqBody []byte, genConfig any) {
-	if !utils.IsDebugMode() {
-		return
-	}
-
-	_ = os.MkdirAll("debug_dumps", 0755)
-	filename := s.getDebugDumpPath(r)
-
-	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		utils.L().Errorf("Failed to open debug dump file: %v", err)
-		return
-	}
-	defer f.Close()
-
-	fmt.Fprintf(f, "=== [%s] Raw Request Body ===\n%s\n\n", time.Now().Format(time.RFC3339), string(reqBody))
-
-	if genConfig != nil {
-		configBytes, _ := json.MarshalIndent(genConfig, "", "  ")
-		fmt.Fprintf(f, "=== Parsed GenerationConfig ===\n%s\n\n", string(configBytes))
-	} else {
-		fmt.Fprintf(f, "=== Parsed GenerationConfig ===\n(parsing failed or not available)\n\n")
-	}
-}
-
-func (s *Server) dumpResponseIfDebug(r *http.Request, resp any) {
-	if !utils.IsDebugMode() {
-		return
-	}
-
-	_ = os.MkdirAll("debug_dumps", 0755)
-	filename := s.getDebugDumpPath(r)
-
-	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		utils.L().Errorf("Failed to open debug dump file for response: %v", err)
-		return
-	}
-	defer f.Close()
-
-	respBytes, _ := json.MarshalIndent(resp, "", "  ")
-	fmt.Fprintf(f, "--- [%s] Outgoing Response Chunk ---\n%s\n\n", time.Now().Format(time.RFC3339), string(respBytes))
-}
-
-
 
 

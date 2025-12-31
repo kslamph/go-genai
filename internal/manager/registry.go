@@ -27,11 +27,11 @@ func NewProviderRegistry() *ProviderRegistry {
 func (r *ProviderRegistry) getOrCreatePool(t provider.ProviderType) *Pool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	
+
 	if pool, exists := r.pools[t]; exists {
 		return pool
 	}
-	
+
 	pool := NewPool()
 	r.pools[t] = pool
 	return pool
@@ -72,7 +72,7 @@ func (r *ProviderRegistry) RegisterOpenAIProvider(providerType provider.Provider
 	default:
 		authProviderType = auth.ProviderTypeOpenAI // fallback
 	}
-	
+
 	cred := auth.NewCredential(p.Name(), authProviderType)
 
 	// Store the provider instance in the credential
@@ -97,7 +97,7 @@ func (r *ProviderRegistry) RegisterGeminiProvider(providerType provider.Provider
 	default:
 		authProviderType = auth.ProviderTypeGemini // fallback
 	}
-	
+
 	cred := auth.NewCredential(p.Name(), authProviderType)
 
 	// Store the provider instance in the credential
@@ -105,42 +105,6 @@ func (r *ProviderRegistry) RegisterGeminiProvider(providerType provider.Provider
 
 	pool := r.getOrCreatePool(providerType)
 	pool.Add(cred)
-}
-
-// GetOpenAIProviders returns all OpenAI-compatible providers of a given type
-// TODO: This method needs to be updated to work with Credentials
-// For now, return nil as this will be replaced by SmartRouter
-func (r *ProviderRegistry) GetOpenAIProviders(providerType provider.ProviderType) []provider.OpenAICompatibleProvider {
-	// TODO: Implement using Credentials
-	// This will be replaced by SmartRouter in Phase 3
-	return nil
-}
-
-// GetGeminiProviders returns all Gemini-native providers of a given type
-// TODO: This method needs to be updated to work with Credentials
-// For now, return nil as this will be replaced by SmartRouter
-func (r *ProviderRegistry) GetGeminiProviders(providerType provider.ProviderType) []provider.GeminiNativeProvider {
-	// TODO: Implement using Credentials
-	// This will be replaced by SmartRouter in Phase 3
-	return nil
-}
-
-// GetAllOpenAIProviders returns all OpenAI-compatible providers from all types
-// TODO: This method needs to be updated to work with Credentials
-// For now, return nil as this will be replaced by SmartRouter
-func (r *ProviderRegistry) GetAllOpenAIProviders() []provider.OpenAICompatibleProvider {
-	// TODO: Implement using Credentials
-	// This will be replaced by SmartRouter in Phase 3
-	return nil
-}
-
-// GetAllGeminiProviders returns all Gemini-native providers from all types
-// TODO: This method needs to be updated to work with Credentials
-// For now, return nil as this will be replaced by SmartRouter
-func (r *ProviderRegistry) GetAllGeminiProviders() []provider.GeminiNativeProvider {
-	// TODO: Implement using Credentials
-	// This will be replaced by SmartRouter in Phase 3
-	return nil
 }
 
 // RemoveProvider removes a specific provider from the registry

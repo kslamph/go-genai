@@ -243,13 +243,6 @@ func (p *AntigravityProvider) RefreshClient(ctx context.Context) (*genai.Client,
 	return p.client, nil
 }
 
-func (p *AntigravityProvider) getProjectID() string {
-	if p.auth != nil {
-		return p.auth.GetProjectID()
-	}
-	return "unknown"
-}
-
 func (p *AntigravityProvider) ListModels(ctx context.Context) ([]string, error) {
 	p.mu.RLock()
 	if len(p.cachedModels) > 0 {
