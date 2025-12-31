@@ -3,6 +3,7 @@ package manager
 import (
 	"sync"
 
+	"github.com/sunbankio/omniproxy/internal/auth"
 	"github.com/sunbankio/omniproxy/internal/provider"
 )
 
@@ -55,93 +56,91 @@ func (r *ProviderRegistry) GetPools() []*Pool {
 }
 
 // RegisterOpenAIProvider adds an OpenAI-compatible provider to the registry
+// TODO: This method should be updated to accept Credential instead of provider
+// For now, we create a credential wrapper around the provider
 func (r *ProviderRegistry) RegisterOpenAIProvider(providerType provider.ProviderType, p provider.OpenAICompatibleProvider) {
+	// Create a credential from the provider with the correct provider type
+	// This is a temporary bridge until the provider factory creates credentials directly
+	var authProviderType auth.ProviderType
+	switch providerType {
+	case provider.ProviderQwen:
+		authProviderType = auth.ProviderTypeQwen
+	case provider.ProviderIFlow:
+		authProviderType = auth.ProviderTypeIFlow
+	case provider.ProviderOpenAI:
+		authProviderType = auth.ProviderTypeOpenAI
+	default:
+		authProviderType = auth.ProviderTypeOpenAI // fallback
+	}
+	
+	cred := auth.NewCredential(p.Name(), authProviderType)
+
+	// Store the provider instance in the credential
+	cred.SetProvider(p)
+
 	pool := r.getOrCreatePool(providerType)
-	pool.Add(p)
+	pool.Add(cred)
 }
 
 // RegisterGeminiProvider adds a Gemini-native provider to the registry
+// TODO: This method should be updated to accept Credential instead of provider
+// For now, we create a credential wrapper around the provider
 func (r *ProviderRegistry) RegisterGeminiProvider(providerType provider.ProviderType, p provider.GeminiNativeProvider) {
+	// Create a credential from the provider with the correct provider type
+	// This is a temporary bridge until the provider factory creates credentials directly
+	var authProviderType auth.ProviderType
+	switch providerType {
+	case provider.ProviderGemini:
+		authProviderType = auth.ProviderTypeGemini
+	case provider.ProviderAntigravity:
+		authProviderType = auth.ProviderTypeAntigravity
+	default:
+		authProviderType = auth.ProviderTypeGemini // fallback
+	}
+	
+	cred := auth.NewCredential(p.Name(), authProviderType)
+
+	// Store the provider instance in the credential
+	cred.SetProvider(p)
+
 	pool := r.getOrCreatePool(providerType)
-	pool.Add(p)
+	pool.Add(cred)
 }
 
 // GetOpenAIProviders returns all OpenAI-compatible providers of a given type
+// TODO: This method needs to be updated to work with Credentials
+// For now, return nil as this will be replaced by SmartRouter
 func (r *ProviderRegistry) GetOpenAIProviders(providerType provider.ProviderType) []provider.OpenAICompatibleProvider {
-	pool := r.GetPool(providerType)
-	if pool == nil {
-		return nil
-	}
-
-	var providers []provider.OpenAICompatibleProvider
-	for _, p := range pool.List() {
-		if prov, ok := p.(provider.OpenAICompatibleProvider); ok {
-			providers = append(providers, prov)
-		}
-	}
-	return providers
+	// TODO: Implement using Credentials
+	// This will be replaced by SmartRouter in Phase 3
+	return nil
 }
 
 // GetGeminiProviders returns all Gemini-native providers of a given type
+// TODO: This method needs to be updated to work with Credentials
+// For now, return nil as this will be replaced by SmartRouter
 func (r *ProviderRegistry) GetGeminiProviders(providerType provider.ProviderType) []provider.GeminiNativeProvider {
-	pool := r.GetPool(providerType)
-	if pool == nil {
-		return nil
-	}
-
-	var providers []provider.GeminiNativeProvider
-	for _, p := range pool.List() {
-		if prov, ok := p.(provider.GeminiNativeProvider); ok {
-			providers = append(providers, prov)
-		}
-	}
-	return providers
+	// TODO: Implement using Credentials
+	// This will be replaced by SmartRouter in Phase 3
+	return nil
 }
 
 // GetAllOpenAIProviders returns all OpenAI-compatible providers from all types
+// TODO: This method needs to be updated to work with Credentials
+// For now, return nil as this will be replaced by SmartRouter
 func (r *ProviderRegistry) GetAllOpenAIProviders() []provider.OpenAICompatibleProvider {
-	r.mu.RLock()
-	// We need to copy the map keys/values to avoid holding the lock while iterating pools if we were doing complex logic,
-	// but here we just iterate the map.
-	// However, pool.List() acquires the pool's lock, so we must be careful about deadlocks if we held registry lock.
-	// But r.mu protects the map itself.
-	
-	// Better approach: Snapshot the pools
-	var allPools []*Pool
-	for _, pool := range r.pools {
-		allPools = append(allPools, pool)
-	}
-	r.mu.RUnlock()
-
-	var providers []provider.OpenAICompatibleProvider
-	for _, pool := range allPools {
-		for _, p := range pool.List() {
-			if prov, ok := p.(provider.OpenAICompatibleProvider); ok {
-				providers = append(providers, prov)
-			}
-		}
-	}
-	return providers
+	// TODO: Implement using Credentials
+	// This will be replaced by SmartRouter in Phase 3
+	return nil
 }
 
 // GetAllGeminiProviders returns all Gemini-native providers from all types
+// TODO: This method needs to be updated to work with Credentials
+// For now, return nil as this will be replaced by SmartRouter
 func (r *ProviderRegistry) GetAllGeminiProviders() []provider.GeminiNativeProvider {
-	r.mu.RLock()
-	var allPools []*Pool
-	for _, pool := range r.pools {
-		allPools = append(allPools, pool)
-	}
-	r.mu.RUnlock()
-
-	var providers []provider.GeminiNativeProvider
-	for _, pool := range allPools {
-		for _, p := range pool.List() {
-			if prov, ok := p.(provider.GeminiNativeProvider); ok {
-				providers = append(providers, prov)
-			}
-		}
-	}
-	return providers
+	// TODO: Implement using Credentials
+	// This will be replaced by SmartRouter in Phase 3
+	return nil
 }
 
 // RemoveProvider removes a specific provider from the registry
@@ -151,4 +150,22 @@ func (r *ProviderRegistry) RemoveProvider(p provider.BaseProvider) {
 	if pool != nil {
 		pool.Remove(p.Name())
 	}
+}
+
+// RemoveCredential removes a specific credential from the registry
+func (r *ProviderRegistry) RemoveCredential(cred *auth.Credential) {
+	// Find the pool for this credential type
+	pool := r.GetPool(cred.Type())
+	if pool != nil {
+		pool.Remove(cred.Name())
+	}
+}
+
+// GetCredentials returns all credentials for a given provider type
+func (r *ProviderRegistry) GetCredentials(providerType provider.ProviderType) []*auth.Credential {
+	pool := r.GetPool(providerType)
+	if pool == nil {
+		return nil
+	}
+	return pool.List()
 }

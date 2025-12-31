@@ -5,19 +5,28 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/sunbankio/omniproxy/internal/auth"
 	"github.com/sunbankio/omniproxy/internal/manager"
+	"github.com/sunbankio/omniproxy/internal/router"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 )
 
 type Server struct {
-	ps     *manager.ProviderService
-	router *chi.Mux
+	ps      *manager.ProviderService
+	sr      *router.SmartRouter
+	authMgr auth.AuthManager
+	router  *chi.Mux
 }
 
-func NewServer(ps *manager.ProviderService) *Server {
+func NewServer(ps *manager.ProviderService, authMgr auth.AuthManager) *Server {
+	// Initialize SmartRouter with dependencies
+	sr := router.NewSmartRouter(authMgr, ps.GetRegistry(), ps.GetLoadBalancer())
+
 	s := &Server{
-		ps:     ps,
-		router: chi.NewRouter(),
+		ps:      ps,
+		sr:      sr,
+		authMgr: authMgr,
+		router:  chi.NewRouter(),
 	}
 	s.setupRoutes()
 	return s

@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/sashabaranov/go-openai"
 	"github.com/sunbankio/omniproxy/internal/provider"
+	"github.com/sunbankio/omniproxy/internal/router"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 )
 
@@ -68,6 +69,15 @@ func (s *Server) writeModelsResponse(w http.ResponseWriter, modelNames []string)
 }
 
 func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
+	// Log incoming request details to help debug duplicate requests
+	utils.L().Infow("Incoming chat completion request",
+		"method", r.Method,
+		"path", r.URL.Path,
+		"query", r.URL.RawQuery,
+		"content_length", r.ContentLength,
+		"remote_addr", r.RemoteAddr,
+		"user_agent", r.UserAgent())
+
 	// Read the raw body for logging
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -142,14 +152,43 @@ func (s *Server) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, _, err := s.ps.GetOpenAIProviderByModelWithReason(req.Model)
+	// Create router request
+	routerReq := &router.Request{
+		Protocol: provider.ProtocolOpenAI,
+		Model:    req.Model,
+		Payload:  &req,
+		Headers:  make(map[string]string),
+		IsStream: req.Stream,
+	}
+
+	// Copy relevant headers
+	for key, values := range r.Header {
+		if len(values) > 0 {
+			routerReq.Headers[key] = values[0]
+		}
+	}
+
+	// Execute using SmartRouter
+	resp, err := s.sr.Execute(r.Context(), routerReq)
 	if err != nil {
-		utils.L().Errorf("Failed to find OpenAI-compatible provider for model %s: %v", req.Model, err)
-		http.Error(w, err.Error(), http.StatusNotFound)
+		utils.L().Errorf("SmartRouter execution failed: %v", err)
+		s.writeErrorResponse(w, err)
 		return
 	}
 
-	s.executeChat(w, r, p, req)
+	// Copy response headers
+	for key, value := range resp.Headers {
+		w.Header().Set(key, value)
+	}
+
+	// Set status code
+	w.WriteHeader(resp.StatusCode)
+
+	// Stream the response body
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		utils.L().Errorf("Failed to write response body: %v", err)
+	}
+	resp.Body.Close()
 }
 
 func truncate(s string, maxLen int) string {
@@ -176,17 +215,46 @@ func (s *Server) HandleProviderChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, selectionReason, err := s.ps.GetOpenAIProviderWithReason(pType, req.Model)
+	// Create router request with provider preference
+	routerReq := &router.Request{
+		Protocol: provider.ProtocolOpenAI,
+		Model:    req.Model,
+		Payload:  &req,
+		Headers:  make(map[string]string),
+		IsStream: req.Stream,
+	}
+
+	// Add provider preference in headers for SmartRouter to use
+	routerReq.Headers["X-Preferred-Provider"] = providerType
+
+	// Copy relevant headers
+	for key, values := range r.Header {
+		if len(values) > 0 {
+			routerReq.Headers[key] = values[0]
+		}
+	}
+
+	// Execute using SmartRouter
+	resp, err := s.sr.Execute(r.Context(), routerReq)
 	if err != nil {
-		utils.L().Errorf("Failed to find OpenAI-compatible provider %s for model %s: %v", providerType, req.Model, err)
-		http.Error(w, err.Error(), http.StatusNotFound)
+		utils.L().Errorf("SmartRouter execution failed: %v", err)
+		s.writeErrorResponse(w, err)
 		return
 	}
 
-	// Log provider selection with detailed reasoning
-	utils.L().Infof("Model '%s' -> Provider: %s (type: %s) - Reason: %s (explicit provider: %s)", req.Model, p.Name(), p.Type(), selectionReason, providerType)
+	// Copy response headers
+	for key, value := range resp.Headers {
+		w.Header().Set(key, value)
+	}
 
-	s.executeChat(w, r, p, req)
+	// Set status code
+	w.WriteHeader(resp.StatusCode)
+
+	// Stream the response body
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		utils.L().Errorf("Failed to write response body: %v", err)
+	}
+	resp.Body.Close()
 }
 
 func (s *Server) executeChat(w http.ResponseWriter, r *http.Request, p provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) {

@@ -5,14 +5,15 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sunbankio/omniproxy/internal/auth"
 	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 )
 
 // ProviderService is a facade that coordinates provider operations
 type ProviderService struct {
-	registry        *ProviderRegistry
-	loadBalancer    *LoadBalancer
+	registry         *ProviderRegistry
+	loadBalancer     *LoadBalancer
 	rateLimitTracker *RateLimitTracker
 }
 
@@ -51,8 +52,13 @@ func (ps *ProviderService) GetOpenAIProviderWithReason(providerType provider.Pro
 	if pool == nil || pool.Size() == 0 {
 		return nil, "", fmt.Errorf("no OpenAI-compatible providers available for type: %s", providerType)
 	}
-	
-	candidates := pool.List()
+
+	credentials := pool.List()
+	// Convert credentials to BaseProvider interface slice
+	candidates := make([]provider.BaseProvider, len(credentials))
+	for i, cred := range credentials {
+		candidates[i] = cred
+	}
 
 	selected := ps.loadBalancer.SelectRoundRobin(candidates, providerType)
 	if selected == nil {
@@ -62,7 +68,7 @@ func (ps *ProviderService) GetOpenAIProviderWithReason(providerType provider.Pro
 	if openaiProvider, ok := selected.(provider.OpenAICompatibleProvider); ok {
 		return openaiProvider, "round-robin", nil
 	}
-	
+
 	return nil, "", fmt.Errorf("selected provider is not OpenAI-compatible")
 }
 
@@ -84,14 +90,16 @@ func (ps *ProviderService) GetOpenAIProviderByModelWithReason(model string) (pro
 
 	// Find all OpenAI-compatible providers that support this model
 	var candidates []provider.BaseProvider
-	
+
 	// Iterate through all pools
 	pools := ps.registry.GetPools()
 	for _, pool := range pools {
-		for _, p := range pool.List() {
-			if openaiProvider, ok := p.(provider.OpenAICompatibleProvider); ok {
-				if openaiProvider.SupportsModel(model) {
-					candidates = append(candidates, p)
+		credentials := pool.List()
+		for _, cred := range credentials {
+			// Check if this credential is for an OpenAI-compatible provider
+			if cred.ProviderType == auth.ProviderTypeOpenAI || cred.ProviderType == auth.ProviderTypeQwen || cred.ProviderType == auth.ProviderTypeIFlow {
+				if cred.SupportsModel(model) {
+					candidates = append(candidates, cred)
 				}
 			}
 		}
@@ -107,7 +115,7 @@ func (ps *ProviderService) GetOpenAIProviderByModelWithReason(model string) (pro
 	if selected == nil {
 		return nil, "", fmt.Errorf("failed to select provider for model: %s", model)
 	}
-	
+
 	return selected.(provider.OpenAICompatibleProvider), "round-robin", nil
 }
 
@@ -117,22 +125,26 @@ func (ps *ProviderService) GetGeminiProvider(providerType provider.ProviderType,
 	if pool == nil || pool.Size() == 0 {
 		return nil, fmt.Errorf("no Gemini-native providers available for type: %s", providerType)
 	}
-	
-	candidates := pool.List()
+
+	credentials := pool.List()
+	// Convert credentials to BaseProvider interface slice
+	candidates := make([]provider.BaseProvider, len(credentials))
+	for i, cred := range credentials {
+		candidates[i] = cred
+	}
 
 	// Select provider based on rate limit rejection time
 	selected := ps.loadBalancer.SelectLeastRecentlyRejected(candidates, model, ps.rateLimitTracker)
 	if selected == nil {
 		return nil, fmt.Errorf("failed to select Gemini provider from pool: %s", providerType)
 	}
-	
+
 	if geminiProvider, ok := selected.(provider.GeminiNativeProvider); ok {
 		return geminiProvider, nil
 	}
-	
+
 	return nil, fmt.Errorf("selected provider is not Gemini-native")
 }
-
 
 // RecordSuccess records a successful request for a model
 func (ps *ProviderService) RecordSuccess(model string, p provider.BaseProvider) {
@@ -159,16 +171,23 @@ func (ps *ProviderService) ListModels(ctx context.Context) ([]string, error) {
 	uniqueModels := make(map[string]bool)
 	var models []string
 
-	allProviders := ps.registry.GetAllOpenAIProviders()
-	for _, p := range allProviders {
-		ms, err := p.ListModels(ctx)
-		if err != nil {
-			continue
-		}
-		for _, m := range ms {
-			if !uniqueModels[m] {
-				uniqueModels[m] = true
-				models = append(models, m)
+	// Iterate through all pools and get models from credentials
+	pools := ps.registry.GetPools()
+	for _, pool := range pools {
+		credentials := pool.List()
+		for _, cred := range credentials {
+			// Check if this is an OpenAI-compatible provider
+			if cred.ProviderType == auth.ProviderTypeOpenAI || cred.ProviderType == auth.ProviderTypeQwen || cred.ProviderType == auth.ProviderTypeIFlow {
+				ms, err := cred.ListModels(ctx)
+				if err != nil {
+					continue
+				}
+				for _, m := range ms {
+					if !uniqueModels[m] {
+						uniqueModels[m] = true
+						models = append(models, m)
+					}
+				}
 			}
 		}
 	}
@@ -177,22 +196,34 @@ func (ps *ProviderService) ListModels(ctx context.Context) ([]string, error) {
 
 // ListOpenAIProviderModels returns models for a specific OpenAI-compatible provider type
 func (ps *ProviderService) ListOpenAIProviderModels(ctx context.Context, providerType provider.ProviderType) ([]string, error) {
-	pool := ps.registry.GetOpenAIProviders(providerType)
-	if len(pool) == 0 {
+	pool := ps.registry.GetPool(providerType)
+	if pool == nil || pool.Size() == 0 {
 		return nil, fmt.Errorf("no OpenAI-compatible providers available for type: %s", providerType)
 	}
 
-	return pool[0].ListModels(ctx)
+	credentials := pool.List()
+	// Return models from the first credential
+	if len(credentials) > 0 {
+		return credentials[0].ListModels(ctx)
+	}
+
+	return nil, fmt.Errorf("no credentials found for type: %s", providerType)
 }
 
 // ListGeminiProviderModels returns models for a specific Gemini-native provider type
 func (ps *ProviderService) ListGeminiProviderModels(ctx context.Context, providerType provider.ProviderType) ([]string, error) {
-	pool := ps.registry.GetGeminiProviders(providerType)
-	if len(pool) == 0 {
+	pool := ps.registry.GetPool(providerType)
+	if pool == nil || pool.Size() == 0 {
 		return nil, fmt.Errorf("no Gemini-native providers available for type: %s", providerType)
 	}
 
-	return pool[0].ListModels(ctx)
+	credentials := pool.List()
+	// Return models from the first credential
+	if len(credentials) > 0 {
+		return credentials[0].ListModels(ctx)
+	}
+
+	return nil, fmt.Errorf("no credentials found for type: %s", providerType)
 }
 
 // ListGeminiModels returns a list of all models from all Gemini-native providers
@@ -200,16 +231,23 @@ func (ps *ProviderService) ListGeminiModels(ctx context.Context) ([]string, erro
 	uniqueModels := make(map[string]bool)
 	var models []string
 
-	allProviders := ps.registry.GetAllGeminiProviders()
-	for _, p := range allProviders {
-		ms, err := p.ListModels(ctx)
-		if err != nil {
-			continue
-		}
-		for _, m := range ms {
-			if !uniqueModels[m] {
-				uniqueModels[m] = true
-				models = append(models, m)
+	// Iterate through all pools and get models from credentials
+	pools := ps.registry.GetPools()
+	for _, pool := range pools {
+		credentials := pool.List()
+		for _, cred := range credentials {
+			// Check if this is a Gemini-native provider
+			if cred.ProviderType == auth.ProviderTypeGemini || cred.ProviderType == auth.ProviderTypeAntigravity {
+				ms, err := cred.ListModels(ctx)
+				if err != nil {
+					continue
+				}
+				for _, m := range ms {
+					if !uniqueModels[m] {
+						uniqueModels[m] = true
+						models = append(models, m)
+					}
+				}
 			}
 		}
 	}
@@ -220,13 +258,15 @@ func (ps *ProviderService) ListGeminiModels(ctx context.Context) ([]string, erro
 func (ps *ProviderService) GetAnyGeminiProviderByModel(model string) (provider.GeminiNativeProvider, error) {
 	// Collect all providers that support this model
 	var candidates []provider.BaseProvider
-	
+
 	pools := ps.registry.GetPools()
 	for _, pool := range pools {
-		for _, p := range pool.List() {
-			if geminiProvider, ok := p.(provider.GeminiNativeProvider); ok {
-				if geminiProvider.SupportsModel(model) {
-					candidates = append(candidates, p)
+		credentials := pool.List()
+		for _, cred := range credentials {
+			// Check if this is a Gemini-native provider
+			if cred.ProviderType == auth.ProviderTypeGemini || cred.ProviderType == auth.ProviderTypeAntigravity {
+				if cred.SupportsModel(model) {
+					candidates = append(candidates, cred)
 				}
 			}
 		}
@@ -241,7 +281,7 @@ func (ps *ProviderService) GetAnyGeminiProviderByModel(model string) (provider.G
 	if selected == nil {
 		return nil, fmt.Errorf("failed to select Gemini provider for model: %s", model)
 	}
-	
+
 	return selected.(provider.GeminiNativeProvider), nil
 }
 
@@ -252,4 +292,14 @@ func (ps *ProviderService) RemoveInvalidProvider(p provider.BaseProvider) {
 		"provider_type", p.Type())
 
 	ps.registry.RemoveProvider(p)
+}
+
+// GetRegistry returns the provider registry
+func (ps *ProviderService) GetRegistry() *ProviderRegistry {
+	return ps.registry
+}
+
+// GetLoadBalancer returns the load balancer
+func (ps *ProviderService) GetLoadBalancer() *LoadBalancer {
+	return ps.loadBalancer
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sunbankio/omniproxy/internal/api"
+	"github.com/sunbankio/omniproxy/internal/auth"
 	"github.com/sunbankio/omniproxy/internal/config"
 	"github.com/sunbankio/omniproxy/internal/manager"
 	"github.com/sunbankio/omniproxy/pkg/utils"
@@ -47,21 +48,27 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 3. Initialize Provider Service
+	// 3. Initialize Auth Manager
+	authMgr := auth.NewManager()
+
+	// 4. Initialize Provider Service
 	ps, err := manager.NewProviderServiceManager(ctx, cfg)
 	if err != nil {
 		utils.L().Fatalf("Failed to initialize provider service: %v", err)
 	}
 
-	// 4. Initialize Server
-	server := api.NewServer(ps)
+	// Start cleanup routine for client pools
+	go manager.StartCleanupRoutine(ctx, ps.GetRegistry())
+
+	// 5. Initialize Server
+	server := api.NewServer(ps, authMgr)
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", *port),
 		Handler: server,
 	}
 
-	// 5. Graceful Shutdown
+	// 6. Graceful Shutdown
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
