@@ -101,9 +101,9 @@ func NewSmartRouter(authManager auth.AuthManager, registry *manager.ProviderRegi
 	}
 }
 
-const (
-	MaxRetries = 3
-)
+// const (
+// 	MaxRetries = 3
+// )
 
 // Execute executes a request without retries - clients handle error retry logic
 func (r *SmartRouter) Execute(ctx context.Context, req *Request) (*Response, error) {
