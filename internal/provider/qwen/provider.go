@@ -68,11 +68,17 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 		defer stream.Close()
 
 		for {
-			response, err := stream.Recv()
-			if err != nil {
-				return // Stream finished or error
+			select {
+			case <-ctx.Done():
+				// Client disconnected, clean up
+				return
+			default:
+				response, err := stream.Recv()
+				if err != nil {
+					return // Stream finished or error
+				}
+				respChan <- response
 			}
-			respChan <- response
 		}
 	}()
 

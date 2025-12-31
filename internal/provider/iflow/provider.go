@@ -70,13 +70,19 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 		defer stream.Close()
 
 		for {
-			response, err := stream.Recv()
-			if err != nil {
-				// iFlow might send EOF error at end? handled by caller or here?
-				// standard go-openai behavior is to return io.EOF.
+			select {
+			case <-ctx.Done():
+				// Client disconnected, clean up
 				return
+			default:
+				response, err := stream.Recv()
+				if err != nil {
+					// iFlow might send EOF error at end? handled by caller or here?
+					// standard go-openai behavior is to return io.EOF.
+					return
+				}
+				respChan <- response
 			}
-			respChan <- response
 		}
 	}()
 
