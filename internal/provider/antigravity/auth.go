@@ -78,6 +78,11 @@ func NewAuthenticator(config *OAuthConfig) *Authenticator {
 
 // GetCredentialsPath returns the path to the credentials file
 func (a *Authenticator) GetCredentialsPath() string {
+	// If CredsDir is an absolute path, use it directly
+	if filepath.IsAbs(a.config.CredsDir) {
+		return filepath.Join(a.config.CredsDir, a.config.CredsFile)
+	}
+	// Otherwise, join with home directory
 	homeDir, _ := os.UserHomeDir()
 	return filepath.Join(homeDir, a.config.CredsDir, a.config.CredsFile)
 }

@@ -3,12 +3,13 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/sunbankio/omniproxy/internal/auth"
+	"github.com/sunbankio/omniproxy/internal/manager"
 	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/internal/router"
 	"github.com/sunbankio/omniproxy/pkg/utils"
@@ -99,7 +100,6 @@ func (ts *thoughtSignature) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// toGenAIConfig converts the request to the SDK's GenerateContentConfig
 func (r *GeminiRequest) toGenAIConfig() *genai.GenerateContentConfig {
 	config := r.GenerationConfig
 	if config == nil {
@@ -143,71 +143,53 @@ func (r *GeminiRequest) toGenAIContents() []*genai.Content {
 	return contents
 }
 
-// ============================================================================
-// Unified Gemini v1beta API Handlers
-// These handlers service both /v1beta and /{provider}/v1beta routes
-// ============================================================================
-
-// HandleGeminiUnifiedModels handles GET /v1beta/models or /{provider}/v1beta/models
-// It can list models for a specific provider or all providers if no provider is specified.
-func (s *Server) HandleGeminiUnifiedModels(w http.ResponseWriter, r *http.Request) {
-	providerType := chi.URLParam(r, "provider")
-
-	var models []string
-	var err error
-
-	if providerType != "" {
-		// Specific provider case: only allow gemini and antigravity
-		pType := provider.ProviderType(providerType)
-		if pType != provider.ProviderGemini && pType != provider.ProviderAntigravity {
-			utils.L().Warnf("Provider %s not available for Gemini v1beta API", providerType)
-			http.Error(w, fmt.Sprintf("provider '%s' is not available for Gemini v1beta API. Available providers: gemini, antigravity", providerType), http.StatusNotFound)
-			return
-		}
-		models, err = s.ps.ListGeminiProviderModels(r.Context(), pType)
-	} else {
-		// Load-balanced case: get models from all Gemini providers
-		models, err = s.ps.ListGeminiModels(r.Context())
-	}
-
-	if err != nil {
-		utils.L().Errorf("Failed to list Gemini models: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Return in Gemini API format
-	type Model struct {
-		Name        string `json:"name"`
-		DisplayName string `json:"displayName,omitempty"`
-		Description string `json:"description,omitempty"`
-	}
-
-	type ListModelsResponse struct {
-		Models []Model `json:"models"`
-	}
-
-	resp := ListModelsResponse{
-		Models: make([]Model, 0, len(models)),
-	}
-
-	for _, modelName := range models {
-		resp.Models = append(resp.Models, Model{
-			Name:        "models/" + modelName,
-			DisplayName: modelName,
-		})
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		utils.L().Errorf("Failed to encode Gemini models response: %v", err)
-	}
+type ServerV2 struct {
+	sr       *router.SmartRouterV2
+	registry *manager.Registry
+	router   *chi.Mux
 }
 
-// HandleGeminiUnifiedGenerateContent handles POST /v1beta/models/{model}:generateContent or /{provider}/v1beta/{model}:generateContent
-// It can route to a specific provider or load balance across all available providers.
-func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *http.Request) {
-	providerType := chi.URLParam(r, "provider")
+func NewServerV2(sr *router.SmartRouterV2, registry *manager.Registry) *ServerV2 {
+	s := &ServerV2{
+		sr:       sr,
+		registry: registry,
+		router:   chi.NewRouter(),
+	}
+	s.setupRoutes()
+	return s
+}
+
+func (s *ServerV2) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.router.ServeHTTP(w, r)
+}
+
+func (s *ServerV2) setupRoutes() {
+	s.router.Use(middleware.RequestID)
+	s.router.Use(middleware.RealIP)
+	s.router.Use(middleware.Logger)
+	s.router.Use(middleware.Recoverer)
+
+	// OpenAI-compatible API
+	s.router.Route("/v1", func(r chi.Router) {
+		r.Post("/chat/completions", s.HandleOpenAIChatCompletions)
+		r.Get("/models", s.HandleListModels)
+	})
+
+	// Gemini V1Beta API
+	s.router.Route("/v1beta", func(r chi.Router) {
+		r.Post("/models/{model}:generateContent", s.HandleGeminiGenerateContent)
+		r.Post("/models/{model}:streamGenerateContent", s.HandleGeminiStreamGenerateContent)
+	})
+
+	s.router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+}
+
+// Handlers
+
+func (s *ServerV2) HandleGeminiGenerateContent(w http.ResponseWriter, r *http.Request) {
 	modelName := chi.URLParam(r, "model")
 
 	// Read request body
@@ -217,17 +199,15 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 		http.Error(w, "failed to read request body", http.StatusInternalServerError)
 		return
 	}
+	defer r.Body.Close()
 
-	// Parse the request
+	// Parse the request directly into structured types (like old implementation)
 	var req GeminiRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	// Construct final GenerationConfig
-	finalConfig := req.toGenAIConfig()
 
 	// Validate request
 	if modelName == "" {
@@ -239,61 +219,45 @@ func (s *Server) HandleGeminiUnifiedGenerateContent(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// Create router request
+	// Create router request with structured types (not map)
 	routerReq := &router.Request{
 		Protocol: provider.ProtocolGemini,
 		Model:    modelName,
 		Payload: map[string]interface{}{
 			"request":          &req,
 			"contents":         req.toGenAIContents(),
-			"generationConfig": finalConfig,
+			"generationConfig": req.toGenAIConfig(),
 		},
 		Headers:  make(map[string]string),
 		IsStream: false,
 	}
 
-	// Add provider preference if specified
-	if providerType != "" {
-		routerReq.Headers["X-Preferred-Provider"] = providerType
-	}
-
-	// Copy relevant headers
+	// Copy headers
 	for key, values := range r.Header {
 		if len(values) > 0 {
 			routerReq.Headers[key] = values[0]
 		}
 	}
 
-	// Execute using SmartRouter
 	resp, err := s.sr.Execute(r.Context(), routerReq)
 	if err != nil {
-		utils.L().Errorf("SmartRouter execution failed: %v", err)
-		s.writeGeminiErrorResponse(w, err)
+		s.handleError(w, err)
 		return
 	}
+	defer resp.Body.Close()
 
-	// Copy response headers
-	for key, value := range resp.Headers {
-		w.Header().Set(key, value)
+	// Copy Response Headers
+	for k, v := range resp.Headers {
+		w.Header().Set(k, v)
 	}
-
-	// Set Gemini-specific headers
 	w.Header().Set("x-goog-api-client", "genai-go")
-
-	// Set status code
 	w.WriteHeader(resp.StatusCode)
-
-	// Stream the response body
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		utils.L().Errorf("Failed to write response body: %v", err)
-	}
-	resp.Body.Close()
+	
+	// Stream Body
+	io.Copy(w, resp.Body)
 }
 
-// HandleGeminiUnifiedStreamGenerateContent handles POST /v1beta/models/{model}:streamGenerateContent or /{provider}/v1beta/{model}:streamGenerateContent
-// It can route to a specific provider or load balance across all available providers.
-func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter, r *http.Request) {
-	providerType := chi.URLParam(r, "provider")
+func (s *ServerV2) HandleGeminiStreamGenerateContent(w http.ResponseWriter, r *http.Request) {
 	modelName := chi.URLParam(r, "model")
 
 	// Read request body
@@ -303,17 +267,15 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 		http.Error(w, "failed to read request body", http.StatusInternalServerError)
 		return
 	}
+	defer r.Body.Close()
 
-	// Parse the request
+	// Parse the request directly into structured types (like old implementation)
 	var req GeminiRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		utils.L().Errorf("Failed to decode Gemini request: %v", err)
 		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	// Construct final GenerationConfig
-	finalConfig := req.toGenAIConfig()
 
 	// Validate request
 	if modelName == "" {
@@ -325,106 +287,166 @@ func (s *Server) HandleGeminiUnifiedStreamGenerateContent(w http.ResponseWriter,
 		return
 	}
 
-	// Create router request
+	// Create router request with structured types (not map)
 	routerReq := &router.Request{
 		Protocol: provider.ProtocolGemini,
 		Model:    modelName,
 		Payload: map[string]interface{}{
 			"request":          &req,
 			"contents":         req.toGenAIContents(),
-			"generationConfig": finalConfig,
+			"generationConfig": req.toGenAIConfig(),
 		},
 		Headers:  make(map[string]string),
 		IsStream: true,
 	}
 
-	// Add provider preference if specified
-	if providerType != "" {
-		routerReq.Headers["X-Preferred-Provider"] = providerType
-	}
-
-	// Copy relevant headers
+	// Copy headers
 	for key, values := range r.Header {
 		if len(values) > 0 {
 			routerReq.Headers[key] = values[0]
 		}
 	}
 
-	// Execute using SmartRouter
 	resp, err := s.sr.Execute(r.Context(), routerReq)
 	if err != nil {
-		utils.L().Errorf("SmartRouter execution failed: %v", err)
-		s.writeGeminiErrorResponse(w, err)
+		s.handleError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy Response Headers
+	for k, v := range resp.Headers {
+		w.Header().Set(k, v)
+	}
+	w.Header().Set("x-goog-api-client", "genai-go")
+	w.WriteHeader(resp.StatusCode)
+	
+	// Stream Body
+	io.Copy(w, resp.Body)
+}
+
+func (s *ServerV2) HandleOpenAIChatCompletions(w http.ResponseWriter, r *http.Request) {
+	// Read Body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	var payload map[string]interface{}
+	if len(bodyBytes) > 0 {
+		if err := json.Unmarshal(bodyBytes, &payload); err != nil {
+			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Extract model from payload
+	model, _ := payload["model"].(string)
+	if model == "" {
+		http.Error(w, "model is required", http.StatusBadRequest)
 		return
 	}
 
-	// Copy response headers
-	for key, value := range resp.Headers {
-		w.Header().Set(key, value)
+	// Detect if streaming from payload
+	isStream := false
+	if stream, ok := payload["stream"].(bool); ok {
+		isStream = stream
 	}
 
-	// Set Gemini-specific headers
-	w.Header().Set("x-goog-api-client", "genai-go")
+	req := &router.Request{
+		Protocol: provider.ProtocolOpenAI,
+		Model:    model,
+		Payload:  payload,
+		IsStream: isStream,
+		Headers:  map[string]string{},
+	}
+	
+	// Copy headers
+	for k, v := range r.Header {
+		if len(v) > 0 {
+			req.Headers[k] = v[0]
+		}
+	}
 
-	// Set status code
+	resp, err := s.sr.Execute(r.Context(), req)
+	if err != nil {
+		s.handleError(w, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy Response Headers
+	for k, v := range resp.Headers {
+		w.Header().Set(k, v)
+	}
 	w.WriteHeader(resp.StatusCode)
-
-	// Stream the response body
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		utils.L().Errorf("Failed to write response body: %v", err)
-	}
-	resp.Body.Close()
+	
+	// Stream Body
+	io.Copy(w, resp.Body)
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+func (s *ServerV2) HandleListModels(w http.ResponseWriter, r *http.Request) {
+	// Get all models from the registry
+	allModels := s.registry.ListModels()
 
-// writeGeminiErrorResponse writes an error response for Gemini API
-func (s *Server) writeGeminiErrorResponse(w http.ResponseWriter, err error) {
-	// Default values
-	statusCode := http.StatusInternalServerError
-	message := err.Error()
-	status := ""
-	details := []map[string]any{}
+	// Filter to only include OpenAI-compatible models (exclude Gemini and Antigravity)
+	models := make([]string, 0, len(allModels))
+	for _, model := range allModels {
+		// Check if this model belongs to an OpenAI-compatible provider
+		// by getting the pool and checking the credential type
+		pool := s.registry.GetPool(model)
+		if pool != nil {
+			creds := pool.List()
+			if len(creds) > 0 {
+				// Only include models from Qwen or IFlow providers
+				if creds[0].ProviderType == auth.ProviderTypeQwen || creds[0].ProviderType == auth.ProviderTypeIFlow {
+					models = append(models, model)
+				}
+			}
+		}
+	}
 
-	// Try to extract genai.APIError from the error
-	var apiErr genai.APIError
-	if errors.As(err, &apiErr) {
-		// Use the structured error from genai SDK
-		statusCode = apiErr.Code
-		message = apiErr.Message
-		status = apiErr.Status
-		details = apiErr.Details
-		utils.L().Warnf("Writing Gemini error response from APIError: status=%d, message=%s, status_string=%s", statusCode, message, status)
-	} else {
-		// Fallback to using the raw error
-		utils.L().Warnf("Writing Gemini error response from raw error: status=%d, message=%s", statusCode, message)
+	// Create response in OpenAI format
+	data := make([]map[string]interface{}, 0, len(models))
+	for _, model := range models {
+		data = append(data, map[string]interface{}{
+			"id":       model,
+			"object":   "model",
+			"created":  0,
+			"owned_by": "omniproxy",
+		})
+	}
+
+	response := map[string]interface{}{
+		"object": "list",
+		"data":   data,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-
-	errorResp := map[string]interface{}{
-		"error": map[string]interface{}{
-			"code":    statusCode,
-			"message": message,
-		},
-	}
-
-	// Add status field if available
-	if status != "" {
-		errorResp["error"].(map[string]interface{})["status"] = status
-	}
-
-	// Add details field if available
-	if len(details) > 0 {
-		errorResp["error"].(map[string]interface{})["details"] = details
-	}
-
-	if err := json.NewEncoder(w).Encode(errorResp); err != nil {
-		utils.L().Errorf("Failed to encode Gemini error response: %v", err)
-	}
+	json.NewEncoder(w).Encode(response)
 }
 
+func (s *ServerV2) handleError(w http.ResponseWriter, err error) {
+	if pErr, ok := err.(*provider.ProviderError); ok {
+		utils.L().Warnf("Request failed: %v", pErr)
+		
+		// Gemini Error Format
+		errResp := map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    pErr.StatusCode,
+				"message": pErr.Message,
+				"status":  http.StatusText(pErr.StatusCode),
+			},
+		}
+		
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(pErr.StatusCode)
+		json.NewEncoder(w).Encode(errResp)
+		return
+	}
 
+	utils.L().Errorf("Internal error: %v", err)
+	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+}

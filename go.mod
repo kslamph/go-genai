@@ -4,8 +4,6 @@ go 1.25.0
 
 replace google.golang.org/genai => github.com/kslamph/go-genai v0.0.0-20251224002921-15b7a82f8387
 
-// replace google.golang.org/genai => ../qwencoder-proxy/go-genai/
-
 require (
 	cloud.google.com/go/auth v0.18.0
 	github.com/go-chi/chi/v5 v5.2.3

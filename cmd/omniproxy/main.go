@@ -14,6 +14,7 @@ import (
 	"github.com/sunbankio/omniproxy/internal/auth"
 	"github.com/sunbankio/omniproxy/internal/config"
 	"github.com/sunbankio/omniproxy/internal/manager"
+	"github.com/sunbankio/omniproxy/internal/router"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 )
 
@@ -27,7 +28,7 @@ func main() {
 	// 1. Initialize Logger
 	utils.InitLogger(*logLevel)
 	defer utils.CloseLogger()
-	utils.L().Info("Starting OmniProxy...")
+	utils.L().Info("Starting OmniProxy (V2)...")
 
 	// 2. Load Config
 	cfg, err := config.LoadConfig(*configPath)
@@ -38,20 +39,28 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 3. Initialize Auth Manager
+	// 3. Initialize V2 Components
+	
+	// A. Auth Manager
 	authMgr := auth.NewManager()
 
-	// 4. Initialize Provider Service
-	ps, err := manager.NewProviderServiceManager(ctx, cfg)
-	if err != nil {
-		utils.L().Fatalf("Failed to initialize provider service: %v", err)
+	// B. Registry (V2)
+	registry := manager.NewRegistry()
+
+	// C. Credential Factory (V2)
+	factory := manager.NewCredentialFactory()
+	if err := factory.InitializeAllCredentials(ctx, cfg, registry, authMgr); err != nil {
+		utils.L().Warnf("Some credentials failed to initialize: %v", err)
 	}
 
-	// Start cleanup routine for client pools
-	go manager.StartCleanupRoutine(ctx, ps.GetRegistry())
+	// D. Smart Router (V2)
+	sr := router.NewSmartRouterV2(authMgr, registry)
 
-	// 5. Initialize Server
-	server := api.NewServer(ps, authMgr)
+	// E. Server (V2)
+	server := api.NewServerV2(sr, registry)
+
+	// F. Cleanup Routine
+	go manager.StartCleanupRoutine(ctx, registry)
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf(":%d", *port),
@@ -73,7 +82,7 @@ func main() {
 		}
 	}()
 
-	utils.L().Infof("OmniProxy listening on :%d", *port)
+	utils.L().Infof("OmniProxy V2 listening on :%d", *port)
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		utils.L().Fatalf("Server failed: %v", err)
 	}

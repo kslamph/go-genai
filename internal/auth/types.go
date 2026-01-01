@@ -181,9 +181,14 @@ func (c *Credential) GetClient() interface{} {
 	if c.clientPool == nil {
 		return nil
 	}
-	return c.clientPool.GetClient()
+	client := c.clientPool.GetClient()
+	// Fix for "nil interface" gotcha:
+	// If the typed pointer is nil, return explicit nil interface
+	if client == nil {
+		return nil
+	}
+	return client
 }
-
 // Cleanup removes old clients from the credential's client pool
 // This delegates to the underlying ClientPool's Cleanup method
 func (c *Credential) Cleanup() {

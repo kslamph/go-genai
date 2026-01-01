@@ -27,7 +27,7 @@ type GeminiProvider struct {
 // NewProvider creates a new Gemini provider with auth
 func NewProvider(ctx context.Context, name string, auth *Authenticator) (*GeminiProvider, error) {
 	// 1. Discover Project ID
-	projectID, err := discoverProjectID(ctx, auth, CloudCodeBaseURL)
+	projectID, err := DiscoverProjectID(ctx, auth, CloudCodeBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover project ID: %w", err)
 	}
@@ -78,7 +78,7 @@ func (p *GeminiProvider) GetAuth() *Authenticator {
 // This is necessary because genai.Client caches tokens internally and doesn't automatically pick up refreshed tokens
 func (p *GeminiProvider) RefreshClient(ctx context.Context) (*genai.Client, error) {
 	// Discover Project ID (it shouldn't change, but we need it for the new client)
-	projectID, err := discoverProjectID(ctx, p.auth, CloudCodeBaseURL)
+	projectID, err := DiscoverProjectID(ctx, p.auth, CloudCodeBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover project ID during client refresh: %w", err)
 	}
@@ -135,8 +135,8 @@ func (p *GeminiProvider) SupportsModel(model string) bool {
 	return false
 }
 
-// discoverProjectID helps find the project ID needed for Gemini API
-func discoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
+// DiscoverProjectID helps find the project ID needed for Gemini API
+func DiscoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
 	// Retry loop for handling 401 Unauthenticated
 	for attempt := 0; attempt < 2; attempt++ {
 		token, err := authenticator.GetToken(ctx)
