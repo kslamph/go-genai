@@ -95,6 +95,11 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 		return nil, err
 	}
 
+	// Success: Reset FailureCount to 0 to prevent backoff accumulation across unrelated failures
+	if r.errorRecorder != nil {
+		r.errorRecorder.RecordSuccess(cred.ID, req.Model)
+	}
+
 	return resp, nil
 }
 

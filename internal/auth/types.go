@@ -70,10 +70,10 @@ type Credential struct {
 	ProjectID    string    `json:"project_id,omitempty"`
 
 	// State data
-	State              CredentialState `json:"state"`
-	FailureCount       int             `json:"failure_count"`
-	RateLimitResetTime time.Time       `json:"rate_limit_reset_time,omitempty"` // When rate limit will reset (from 429 error)
-	LastUsedAt         time.Time       `json:"last_used_at,omitempty"`           // Last time this credential was used (for round-robin)
+	State        CredentialState `json:"state"`
+	FailureCount int             `json:"failure_count"`
+	AvailableAt  time.Time       `json:"rate_limit_reset_time,omitempty"` // When rate limit will reset (from 429 error)
+	LastUsedAt   time.Time       `json:"last_used_at,omitempty"`          // Last time this credential was used (for round-robin)
 
 	// Client pool for this credential
 	clientPool *ClientPool `json:"-"`
@@ -151,7 +151,7 @@ func (c *Credential) ListModels(ctx context.Context) ([]string, error) {
 			"error", err)
 		return models, err
 	}
-	
+
 	// If no provider is available, return empty list
 	// This could happen if the credential hasn't been fully initialized
 	utils.L().Infow("Credential.ListModels no provider available",
@@ -167,11 +167,11 @@ func (c *Credential) SupportsModel(model string) bool {
 	if provider := c.GetProvider(); provider != nil {
 		return provider.SupportsModel(model)
 	}
-	
+
 	// In V2, providers should always be set. If provider is nil, return false.
 	utils.L().Warnw("SupportsModel called but no provider available",
 		"credential_id", c.ID,
-	"provider_type", c.ProviderType,
+		"provider_type", c.ProviderType,
 		"model", model)
 	return false
 }
@@ -190,6 +190,7 @@ func (c *Credential) GetClient() interface{} {
 	}
 	return client
 }
+
 // Cleanup removes old clients from the credential's client pool
 // This delegates to the underlying ClientPool's Cleanup method
 func (c *Credential) Cleanup() {

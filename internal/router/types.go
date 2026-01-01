@@ -43,8 +43,12 @@ type Router interface {
 // This allows the router to update credential state without creating an import cycle
 type CredentialErrorRecorder interface {
 	// RecordError records an error for a credential and updates its state based on error type
-	// For 429 errors, it sets RateLimitResetTime or increases FailureCount for exponential backoff
+	// For 429 errors, it sets AvailableAt or increases FailureCount for exponential backoff
 	RecordError(credentialID string, model string, err error)
+
+	// RecordSuccess records a successful request for a credential
+	// Resets FailureCount to 0 to prevent backoff accumulation across unrelated failures
+	RecordSuccess(credentialID string, model string)
 }
 
 // CredentialSelector defines the interface for selecting credentials

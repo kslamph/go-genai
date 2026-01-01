@@ -96,22 +96,16 @@ func (r *Registry) RecordError(credentialID string, model string, err error) {
 
 				if !resetTime.IsZero() {
 					// Type 1 or Type 2: Explicit reset time provided
-					// Set RateLimitResetTime - credential won't be selected until this time
-					cred.RateLimitResetTime = resetTime
+					// Set AvailableAt - credential won't be selected until this time
+					cred.AvailableAt = resetTime
 					cred.FailureCount = 0 // Reset failure count since we have explicit reset time
 				} else {
 					// Type 3: No explicit reset time - use exponential backoff
 					cred.FailureCount++
 					backoffDuration := router.GetExponentialBackoffDuration(cred.FailureCount)
-					cred.RateLimitResetTime = time.Now().Add(backoffDuration)
+					cred.AvailableAt = time.Now().Add(backoffDuration)
 				}
 
-				// Log the rate limit error handling
-				// utils.L().Warnw("Rate limit error recorded",
-				// 	"credential_id", cred.ID,
-				// 	"failure_count", cred.FailureCount,
-				// 	"rate_limit_reset_time", cred.RateLimitResetTime,
-				// 	"error", err)
 				return
 			}
 
@@ -121,6 +115,27 @@ func (r *Registry) RecordError(credentialID string, model string, err error) {
 				// Mark as dead if too many failures
 				cred.State = auth.CredentialStateDead
 			}
+			return
+		}
+	}
+}
+
+// RecordSuccess records a successful request for a credential
+// This implements the CredentialErrorRecorder interface
+func (r *Registry) RecordSuccess(credentialID string, model string) {
+	pool := r.GetPool(model)
+	if pool == nil {
+		return
+	}
+
+	// Find the credential by ID and reset its failure count
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	for _, cred := range pool.credentials {
+		if cred.ID == credentialID {
+			// Reset FailureCount to 0 to prevent backoff accumulation
+			cred.FailureCount = 0
 			return
 		}
 	}
@@ -137,7 +152,7 @@ func (p *CredentialPool) Add(cred *auth.Credential) {
 func (p *CredentialPool) List() []*auth.Credential {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	
+
 	result := make([]*auth.Credential, len(p.credentials))
 	copy(result, p.credentials)
 	return result
@@ -146,7 +161,7 @@ func (p *CredentialPool) List() []*auth.Credential {
 // GetNext returns a credential based on round-robin selection.
 // Implements the following logic:
 // 1. Round-robin selection based on LastUsedAt timestamp
-// 2. Skip credentials that are in rate limit penalty (RateLimitResetTime > now)
+// 2. Skip credentials that are in rate limit penalty (AvailableAt > now)
 // 3. Skip credentials that are dead
 // 4. Update LastUsedAt when a credential is selected
 func (p *CredentialPool) GetNext() *auth.Credential {
@@ -164,7 +179,7 @@ func (p *CredentialPool) GetNext() *auth.Credential {
 	// Find the oldest used credential that is not in penalty
 	for _, cred := range p.credentials {
 		// Check if credential is in rate limit penalty
-		if !cred.RateLimitResetTime.IsZero() && now.Before(cred.RateLimitResetTime) {
+		if !cred.AvailableAt.IsZero() && now.Before(cred.AvailableAt) {
 			// Skip this credential - it's in rate limit penalty
 			continue
 		}
@@ -189,9 +204,9 @@ func (p *CredentialPool) GetNext() *auth.Credential {
 	// Update LastUsedAt for round-robin
 	selectedCred.LastUsedAt = now
 
-	// Clear RateLimitResetTime if it has passed to keep credential object clean
-	if !selectedCred.RateLimitResetTime.IsZero() && now.After(selectedCred.RateLimitResetTime) {
-		selectedCred.RateLimitResetTime = time.Time{}
+	// Clear AvailableAt if it has passed to keep credential object clean
+	if !selectedCred.AvailableAt.IsZero() && now.After(selectedCred.AvailableAt) {
+		selectedCred.AvailableAt = time.Time{}
 	}
 
 	return selectedCred
