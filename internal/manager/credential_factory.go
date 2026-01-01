@@ -401,7 +401,7 @@ func (i *IFlowCredentialInitializer) Initialize(ctx context.Context, cfg *config
 			}
 			registry.RegisterCredential(cred, models)
 
-			utils.L().Infof("Loaded IFlow credential: %s with %d models", credID, len(models))
+			utils.L().Infof("Loaded IFlow credential: %s with %d models: %v", credID, len(models), models)
 		}
 	}
 	return nil

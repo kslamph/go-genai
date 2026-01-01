@@ -88,13 +88,13 @@ func IsRateLimitError(err error) bool {
 // Backoff sequence: 30s, 1m, 3m, 5m, 10m, 30m, 60m, 60m, ...
 func GetExponentialBackoffDuration(failureCount int) time.Duration {
 	backoffs := []time.Duration{
-		30 * time.Second,  // 30s
-		1 * time.Minute,   // 1m
-		3 * time.Minute,   // 3m
-		5 * time.Minute,   // 5m
-		10 * time.Minute,  // 10m
-		30 * time.Minute,  // 30m
-		60 * time.Minute,  // 60m
+		30 * time.Second, // 30s
+		1 * time.Minute,  // 1m
+		3 * time.Minute,  // 3m
+		5 * time.Minute,  // 5m
+		10 * time.Minute, // 10m
+		30 * time.Minute, // 30m
+		60 * time.Minute, // 60m
 	}
 
 	if failureCount <= 0 {

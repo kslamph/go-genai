@@ -14,6 +14,7 @@ type ProviderError struct {
 	Message    string      // Error message
 	Details    interface{} // Additional error details (optional)
 	Provider   string      // Provider name that generated the error
+	RetryAfter string      // Retry-After header value for rate limit errors (optional)
 }
 
 func (e *ProviderError) Error() string {
@@ -30,6 +31,17 @@ func NewProviderError(statusCode int, message string, provider string, details i
 		Message:    message,
 		Details:    details,
 		Provider:   provider,
+	}
+}
+
+// NewProviderErrorWithRetry creates a new ProviderError with retry information
+func NewProviderErrorWithRetry(statusCode int, message string, provider string, details interface{}, retryAfter string) *ProviderError {
+	return &ProviderError{
+		StatusCode: statusCode,
+		Message:    message,
+		Details:    details,
+		Provider:   provider,
+		RetryAfter: retryAfter,
 	}
 }
 

@@ -41,7 +41,7 @@ func main() {
 
 	// 3. Create genai.Client
 	ctx := context.Background()
-	
+
 	// Create credentials using our provider
 	creds := auth.NewCredentials(&auth.CredentialsOptions{
 		TokenProvider: tp,
@@ -71,7 +71,7 @@ func main() {
 	// 6. Make request 2 (Should still use TOKEN_1 if cached)
 	fmt.Println("---", "Request 2 (Same Client) ---")
 	client.Models.List(ctx, nil)
-	
+
 	// 7. Recreate Client with SAME creds
 	fmt.Println("---", "Recreating client (Same Creds object) ---")
 	client2, err := genai.NewClient(ctx, &genai.ClientConfig{

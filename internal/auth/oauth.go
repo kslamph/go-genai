@@ -9,7 +9,7 @@ import (
 // TokenProviderAdapter adapts our Credential and AuthManager to cloudauth.TokenProvider
 // This is used for providers that need cloud.google.com/go/auth compatibility (Gemini, Antigravity)
 type TokenProviderAdapter struct {
-	cred   *Credential
+	cred    *Credential
 	manager AuthManager
 }
 

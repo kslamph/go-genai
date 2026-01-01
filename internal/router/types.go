@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/sunbankio/omniproxy/internal/provider"
 )
@@ -55,10 +56,21 @@ type CredentialErrorRecorder interface {
 	MarkDead(credentialID string, model string)
 }
 
+// PenaltyInfo contains information about rate limit penalties for credentials
+type PenaltyInfo struct {
+	AllInPenalty      bool      // True if all credentials are in penalty
+	ShortestResetTime time.Time // The earliest time when any credential will be available
+}
+
 // CredentialSelector defines the interface for selecting credentials
 // This allows the router to get credentials without creating an import cycle
 type CredentialSelector interface {
 	// GetCredential returns a credential for the specified model
 	// Returns nil if no credential is available
 	GetCredential(model string) interface{}
+
+	// GetCredentialWithPenaltyInfo returns a credential and penalty information
+	// Returns (nil, penaltyInfo) if all credentials are in penalty
+	// Returns (nil, nil) if no credentials exist for the model
+	GetCredentialWithPenaltyInfo(model string) (interface{}, interface{})
 }

@@ -40,7 +40,7 @@ func main() {
 	defer cancel()
 
 	// 3. Initialize V2 Components
-	
+
 	// A. Auth Manager
 	authMgr := auth.NewManager()
 

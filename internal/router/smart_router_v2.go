@@ -8,13 +8,28 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sashabaranov/go-openai"
 	"github.com/sunbankio/omniproxy/internal/auth"
+	"github.com/sunbankio/omniproxy/internal/manager"
 	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 	"google.golang.org/genai"
 )
+
+// formatDuration formats a time.Duration into a human-readable string
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.0f seconds", d.Seconds())
+	} else if d < time.Hour {
+		return fmt.Sprintf("%.0f minutes", d.Minutes())
+	} else if d < 24*time.Hour {
+		return fmt.Sprintf("%.1f hours", d.Hours())
+	} else {
+		return fmt.Sprintf("%.1f days", d.Hours()/24)
+	}
+}
 
 // SmartRouterV2 handles routing with "Fast Fail" logic
 type SmartRouterV2 struct {
@@ -160,7 +175,32 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 }
 
 func (r *SmartRouterV2) selectCredential(req *Request) (*auth.Credential, error) {
-	credInterface := r.selector.GetCredential(req.Model)
+	credInterface, penaltyInfoInterface := r.selector.GetCredentialWithPenaltyInfo(req.Model)
+
+	// Check if all credentials are in penalty
+	// Note: penaltyInfoInterface might be a typed nil pointer (*InternalPenaltyInfo(nil)),
+	// which is not equal to nil when assigned to interface{}
+	if penaltyInfoInterface != nil {
+		// Type assert to check if it's actually a nil pointer
+		if penaltyInfo, ok := penaltyInfoInterface.(*manager.InternalPenaltyInfo); ok && penaltyInfo != nil {
+			// All credentials are in penalty, return 429 error
+			message := fmt.Sprintf("All credentials for model '%s' are currently rate limited. Please try again later", req.Model)
+			utils.L().Warnf("selectCredential: all credentials in penalty for model %s, returning 429", req.Model)
+			return nil, provider.NewProviderErrorWithRetry(
+				http.StatusTooManyRequests,
+				message,
+				"omniproxy",
+				nil,
+				"",
+			)
+		}
+	}
+
+	// If no credential selected, try fallback
+	if credInterface == nil {
+		credInterface = r.selector.GetCredential(req.Model)
+	}
+
 	if credInterface == nil {
 		return nil, fmt.Errorf("no active credentials for model %s", req.Model)
 	}
@@ -195,7 +235,7 @@ func (r *SmartRouterV2) executeGemini(ctx context.Context, cred *auth.Credential
 			Provider:   string(cred.Type()),
 		}
 	}
-	
+
 	client, ok := clientRaw.(*genai.Client)
 	if !ok {
 		return nil, &provider.ProviderError{
@@ -610,7 +650,7 @@ func (r *SmartRouterV2) parseGeminiContents(contentsInterface interface{}) ([]*g
 	if ok {
 		return contentsSlice, nil
 	}
-	
+
 	// Fallback: JSON roundtrip
 	contentsBytes, err := json.Marshal(contentsInterface)
 	if err != nil {
@@ -626,7 +666,7 @@ func (r *SmartRouterV2) parseGeminiConfig(configInterface interface{}) (*genai.G
 	if configInterface == nil {
 		return nil, nil
 	}
-	
+
 	var genConfig *genai.GenerateContentConfig
 	configBytes, err := json.Marshal(configInterface)
 	if err != nil {
@@ -639,42 +679,43 @@ func (r *SmartRouterV2) parseGeminiConfig(configInterface interface{}) (*genai.G
 }
 
 func (r *SmartRouterV2) mapGeminiError(err error, cred *auth.Credential) *provider.ProviderError {
+	// Default to 500
 	statusCode := http.StatusInternalServerError
 	message := err.Error()
 	statusStr := ""
 	var details interface{} = nil
-	
-	if apiErr, ok := err.(*genai.APIError); ok {
-		// Use the HTTP status code from the API error
+
+	// Try to extract status code from genai.APIError
+	// Note: err might be genai.APIError (value type) or *genai.APIError (pointer type)
+	var apiErr *genai.APIError
+
+	if ptrErr, ok := err.(*genai.APIError); ok {
+		apiErr = ptrErr
+	} else if valErr, ok := err.(genai.APIError); ok {
+		apiErr = &valErr
+	}
+
+	if apiErr != nil {
 		statusCode = apiErr.Code
-		// Preserve the original error message from the API
 		message = apiErr.Message
-		// Preserve the status string (e.g., "RESOURCE_EXHAUSTED")
 		statusStr = apiErr.Status
-		
-		// Preserve error details if available
 		if len(apiErr.Details) > 0 {
 			details = apiErr.Details
 		}
-		
-		// If the status code is 500 but the error message indicates a different status (like 429),
-		// try to parse the actual status from the error message
-		// genai.APIError sometimes returns 500 for all errors, with the real status in the message
-		if statusCode == http.StatusInternalServerError {
-			// Check if the message contains "Error XXX" pattern
-			var extractedCode int
-			n, _ := fmt.Sscanf(message, "Error %d", &extractedCode)
-			if n == 1 && extractedCode >= 400 && extractedCode < 600 {
-				statusCode = extractedCode
-			}
+
+		// Extract actual status code from error message if needed
+		// genai.APIError.Error() formats as "Error {code}, Message: {message}, Status: {status}, Details: {details}"
+		var extractedCode int
+		if n, _ := fmt.Sscanf(err.Error(), "Error %d", &extractedCode); n == 1 && extractedCode >= 400 && extractedCode < 600 {
+			statusCode = extractedCode
 		}
 	}
-	
-	// If we have a status string, append it to the message for clarity
+
+	// Append status string to message for clarity
 	if statusStr != "" {
 		message = fmt.Sprintf("%s, Status: %s", message, statusStr)
 	}
-	
+
 	return &provider.ProviderError{
 		StatusCode: statusCode,
 		Message:    message,

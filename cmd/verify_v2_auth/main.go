@@ -29,20 +29,20 @@ func main() {
 	cred.AccessToken = "fake-access-token"
 	cred.ProjectID = "test-project"
 	cred.Expiry = time.Now().Add(1 * time.Hour)
-	
+
 	// Register for a model
 	registry.RegisterCredential(cred, []string{"gemini-1.5-pro"})
 	logger.Info("Test Credential registered for 'gemini-1.5-pro'")
 
 	// 4. Simulate Router Selection
 	logger.Info("--- Simulating Request Flow ---")
-	
+
 	// A. Get Pool
 	pool := registry.GetPool("gemini-1.5-pro")
 	if pool == nil {
 		logger.Fatal("Failed to get pool for model")
 	}
-	
+
 	// B. Select Credential
 	selectedCred := pool.GetNext()
 	if selectedCred == nil {
@@ -67,15 +67,15 @@ func main() {
 	client := selectedCred.GetClient()
 	if client == nil {
 		logger.Info("Client is initially nil (Correct)")
-		
+
 		// E. Simulate Client Initialization
-		// This would fail in reality because we don't have real creds, 
+		// This would fail in reality because we don't have real creds,
 		// but we want to see if the logic flow enters the RefreshClient function correctly.
 		// We'll trust the code review for the actual Google call.
 		logger.Info("Skipping actual RefreshClient call (requires real creds)")
 	} else {
 		logger.Info("Client found (unexpected for fresh cred)")
 	}
-	
+
 	logger.Info("Verification Complete - V2 Components Wired Correctly")
 }
