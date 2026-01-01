@@ -141,6 +141,26 @@ func (r *Registry) RecordSuccess(credentialID string, model string) {
 	}
 }
 
+// MarkDead marks a credential as permanently dead
+// This implements the CredentialErrorRecorder interface
+func (r *Registry) MarkDead(credentialID string, model string) {
+	pool := r.GetPool(model)
+	if pool == nil {
+		return
+	}
+
+	// Find the credential by ID and mark it as dead
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	for _, cred := range pool.credentials {
+		if cred.ID == credentialID {
+			cred.State = auth.CredentialStateDead
+			return
+		}
+	}
+}
+
 // Add adds a credential to the pool
 func (p *CredentialPool) Add(cred *auth.Credential) {
 	p.mu.Lock()

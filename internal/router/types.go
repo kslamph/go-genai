@@ -49,6 +49,9 @@ type CredentialErrorRecorder interface {
 	// RecordSuccess records a successful request for a credential
 	// Resets FailureCount to 0 to prevent backoff accumulation across unrelated failures
 	RecordSuccess(credentialID string, model string)
+
+	// MarkDead marks a credential as permanently dead (e.g., when refresh token is revoked)
+	MarkDead(credentialID string, model string)
 }
 
 // CredentialSelector defines the interface for selecting credentials

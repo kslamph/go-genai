@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/sashabaranov/go-openai"
 	"github.com/sunbankio/omniproxy/internal/auth"
@@ -74,8 +75,22 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 		if providerErr, ok := err.(*provider.ProviderError); ok {
 			// If 401, mark credential as "dirty" so NEXT request forces refresh
 			if providerErr.StatusCode == http.StatusUnauthorized {
-				utils.L().Warnf("401 Unauthorized for %s. Marking for refresh.", cred.ID)
-				_ = r.authManager.ForceRefresh(ctx, cred)
+				utils.L().Warnf("401 Unauthorized for %s. Attempting refresh.", cred.ID)
+				refreshErr := r.authManager.ForceRefresh(ctx, cred)
+				if refreshErr != nil {
+					// If refresh fails with 401, the credential is permanently revoked
+					if strings.Contains(strings.ToLower(refreshErr.Error()), "401") ||
+						strings.Contains(strings.ToLower(refreshErr.Error()), "unauthorized") {
+						utils.L().Errorw("Credential marked as DEAD due to refresh failure (Lazarus Protocol)",
+							"credential_id", cred.ID,
+							"provider", string(cred.Type()),
+							"error", refreshErr)
+						if r.errorRecorder != nil {
+							r.errorRecorder.MarkDead(cred.ID, req.Model)
+						}
+					}
+					return nil, refreshErr
+				}
 				_ = r.authManager.RefreshClient(ctx, cred)
 			}
 
