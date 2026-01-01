@@ -2,10 +2,10 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"encoding/json"
 	"time"
 
 	"github.com/sunbankio/omniproxy/internal/auth"
@@ -62,6 +62,102 @@ func (b *BaseCredentialInitializer) getCredentialPaths(cfg *config.Config) []str
 	return append([]string{b.defaultCredsPath}, cfg.Credentials[string(b.providerType)]...)
 }
 
+// initializeCredential handles the common pattern of processing a credential path
+func (b *BaseCredentialInitializer) initializeCredential(
+	ctx context.Context,
+	index int,
+	registry *Registry,
+	authProviderType auth.ProviderType,
+	getToken func() (string, error),
+	configureCredential func(*auth.Credential),
+	createProvider func(ctx context.Context, credID string) (provider.BaseProvider, error),
+	getDefaultModels func() []string,
+) error {
+	// Get token
+	token, err := getToken()
+	if err != nil {
+		return fmt.Errorf("failed to get token: %w", err)
+	}
+
+	// Create credential
+	credID := fmt.Sprintf("%s-%d", authProviderType.String(), index)
+	cred := auth.NewCredential(credID, authProviderType)
+	cred.AccessToken = token
+
+	// Configure credential with provider-specific settings
+	configureCredential(cred)
+
+	// Create provider
+	providerInstance, err := createProvider(ctx, credID)
+	if err != nil {
+		utils.L().Warnf("Failed to create provider for %s: %v", credID, err)
+		// Fallback to default models
+		models := getDefaultModels()
+		registry.RegisterCredential(cred, models)
+		utils.L().Infof("Loaded credential: %s with %d fallback models", credID, len(models))
+		return nil
+	}
+
+	cred.SetProvider(providerInstance)
+
+	// Get models from provider
+	models, err := providerInstance.ListModels(ctx)
+	if err != nil {
+		utils.L().Warnf("Failed to get models for credential %s: %v", credID, err)
+		// Fallback to default models
+		models = getDefaultModels()
+	}
+	registry.RegisterCredential(cred, models)
+
+	utils.L().Infof("Loaded credential: %s with %d models", credID, len(models))
+	return nil
+}
+
+// createGeminiAuthenticator creates a Gemini authenticator
+func (g *GeminiCredentialInitializer) createGeminiAuthenticator(path string, index int) *gemini.Authenticator {
+	return gemini.NewAuthenticator(&gemini.OAuthConfig{
+		ClientID:     gemini.DefaultOAuthConfig().ClientID,
+		ClientSecret: gemini.DefaultOAuthConfig().ClientSecret,
+		Scope:        gemini.DefaultOAuthConfig().Scope,
+		RedirectPort: gemini.DefaultOAuthConfig().RedirectPort + index,
+		CredsPath:    path,
+	})
+}
+
+// configureGeminiCredential configures a Gemini credential with project ID and expiry
+func (g *GeminiCredentialInitializer) configureGeminiCredential(cred *auth.Credential, helper *gemini.Authenticator, path string) {
+	// Discover Project ID (this is critical for API access)
+	projectID, err := gemini.DiscoverProjectID(context.Background(), helper, "https://cloudcode-pa.googleapis.com")
+	if err != nil {
+		utils.L().Warnf("Failed to discover project ID for %s: %v, using fallback", path, err)
+		projectID = "genai-genesis" // Fallback
+	}
+	cred.ProjectID = projectID
+
+	// Try to get expiry from file
+	if data, err := os.ReadFile(path); err == nil {
+		var fileCreds struct {
+			ExpiryDate int64 `json:"expiry_date"`
+		}
+		if json.Unmarshal(data, &fileCreds) == nil && fileCreds.ExpiryDate > 0 {
+			cred.Expiry = time.Unix(fileCreds.ExpiryDate, 0)
+		}
+	}
+	if cred.Expiry.IsZero() {
+		cred.Expiry = time.Now().Add(1 * time.Hour)
+	}
+}
+
+// createGeminiProvider creates a Gemini provider
+func (g *GeminiCredentialInitializer) createGeminiProvider(ctx context.Context, credID string, helper *gemini.Authenticator) (provider.BaseProvider, error) {
+	return gemini.NewProvider(ctx, credID, helper)
+}
+
+// getGeminiDefaultModels returns the default models for Gemini
+func (g *GeminiCredentialInitializer) getGeminiDefaultModels() []string {
+	return []string{"gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-3-flash-preview"}
+}
+
 // GeminiCredentialInitializer initializes Gemini credentials
 type GeminiCredentialInitializer struct {
 	*BaseCredentialInitializer
@@ -80,75 +176,64 @@ func NewGeminiCredentialInitializer() *GeminiCredentialInitializer {
 func (g *GeminiCredentialInitializer) Initialize(ctx context.Context, cfg *config.Config, registry *Registry, authManager auth.AuthManager) error {
 	paths := g.getCredentialPaths(cfg)
 	for i, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			// Initialize Auth Helper (to get initial token)
-			helper := gemini.NewAuthenticator(&gemini.OAuthConfig{
-				ClientID:     gemini.DefaultOAuthConfig().ClientID,
-				ClientSecret: gemini.DefaultOAuthConfig().ClientSecret,
-				Scope:        gemini.DefaultOAuthConfig().Scope,
-				RedirectPort: gemini.DefaultOAuthConfig().RedirectPort + i,
-				CredsPath:    path,
-			})
+		if _, err := os.Stat(path); err != nil {
+			continue // Skip non-existent paths
+		}
 
-			// Get Initial Token
-			token, err := helper.GetToken(ctx)
-			if err != nil {
-				utils.L().Warnf("Failed to load Gemini credential from %s: %v", path, err)
-				continue
-			}
+		helper := g.createGeminiAuthenticator(path, i)
 
-			// Discover Project ID (this is critical for API access)
-			projectID, err := gemini.DiscoverProjectID(ctx, helper, "https://cloudcode-pa.googleapis.com")
-			if err != nil {
-				utils.L().Warnf("Failed to discover project ID for %s: %v, using fallback", path, err)
-				projectID = "genai-genesis" // Fallback
-			}
+		if err := g.initializeCredential(
+			ctx,
 
-			// Create Credential
-			credID := fmt.Sprintf("gemini-%d", i)
-			cred := auth.NewCredential(credID, auth.ProviderTypeGemini)
-			cred.AccessToken = token
-			cred.ProjectID = projectID
-
-			// Try to get expiry
-			if data, err := os.ReadFile(path); err == nil {
-				var fileCreds struct {
-					ExpiryDate int64 `json:"expiry_date"`
-				}
-				if json.Unmarshal(data, &fileCreds) == nil && fileCreds.ExpiryDate > 0 {
-					cred.Expiry = time.Unix(fileCreds.ExpiryDate, 0)
-				}
-			}
-			if cred.Expiry.IsZero() {
-				cred.Expiry = time.Now().Add(1 * time.Hour)
-			}
-
-			// Create provider and get models
-			geminiProvider, err := gemini.NewProvider(ctx, credID, helper)
-			if err != nil {
-				utils.L().Warnf("Failed to create Gemini provider for %s: %v", credID, err)
-				// Fallback to default models
-				models := []string{"gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-3-flash-preview"}
-				registry.RegisterCredential(cred, models)
-				utils.L().Infof("Loaded Gemini credential: %s (project: %s) with %d fallback models", credID, projectID, len(models))
-				continue
-			}
-
-			cred.SetProvider(geminiProvider)
-
-			// Get models from the provider
-			models, err := geminiProvider.ListModels(ctx)
-			if err != nil {
-				utils.L().Warnf("Failed to get models for Gemini credential %s: %v", credID, err)
-				// Fallback to default models
-				models = []string{"gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-3-flash-preview"}
-			}
-			registry.RegisterCredential(cred, models)
-
-			utils.L().Infof("Loaded Gemini credential: %s (project: %s) with %d models", credID, projectID, len(models))
+			i,
+			registry,
+			auth.ProviderTypeGemini,
+			func() (string, error) { return helper.GetToken(ctx) },
+			func(cred *auth.Credential) { g.configureGeminiCredential(cred, helper, path) },
+			func(ctx context.Context, credID string) (provider.BaseProvider, error) {
+				return g.createGeminiProvider(ctx, credID, helper)
+			},
+			g.getGeminiDefaultModels,
+		); err != nil {
+			utils.L().Warnf("Failed to process Gemini credential from %s: %v", path, err)
 		}
 	}
 	return nil
+}
+
+// createAntigravityAuthenticator creates an Antigravity authenticator
+func (a *AntigravityCredentialInitializer) createAntigravityAuthenticator(path string, index int) *antigravity.Authenticator {
+	return antigravity.NewAuthenticator(&antigravity.OAuthConfig{
+		ClientID:     antigravity.DefaultOAuthConfig().ClientID,
+		ClientSecret: antigravity.DefaultOAuthConfig().ClientSecret,
+		Scope:        antigravity.DefaultOAuthConfig().Scope,
+		RedirectPort: antigravity.DefaultOAuthConfig().RedirectPort + index,
+		CredsDir:     filepath.Dir(path),
+		CredsFile:    filepath.Base(path),
+	})
+}
+
+// configureAntigravityCredential configures an Antigravity credential with project ID and expiry
+func (a *AntigravityCredentialInitializer) configureAntigravityCredential(cred *auth.Credential, helper *antigravity.Authenticator) {
+	// Antigravity often needs explicit Project ID
+	// Ideally read from config or discovery
+	cred.ProjectID = "antigravity-test-project"
+
+	if expiry := helper.GetExpiryDate(); expiry > 0 {
+		cred.Expiry = time.Unix(expiry, 0)
+	} else {
+		cred.Expiry = time.Now().Add(1 * time.Hour)
+	}
+}
+
+// createAntigravityProvider creates an Antigravity provider
+func (a *AntigravityCredentialInitializer) createAntigravityProvider(ctx context.Context, credID string, helper *antigravity.Authenticator) (provider.BaseProvider, error) {
+	return antigravity.NewProviderWithGeminiAuth(ctx, credID, helper)
+}
+
+// getAntigravityDefaultModels returns the default models for Antigravity
+func (a *AntigravityCredentialInitializer) getAntigravityDefaultModels() []string {
+	return []string{"gemini-1.5-pro-002", "gemini-1.5-flash-002"}
 }
 
 // AntigravityCredentialInitializer initializes Antigravity credentials
@@ -171,64 +256,25 @@ func NewAntigravityCredentialInitializer() *AntigravityCredentialInitializer {
 func (a *AntigravityCredentialInitializer) Initialize(ctx context.Context, cfg *config.Config, registry *Registry, authManager auth.AuthManager) error {
 	paths := a.getCredentialPaths(cfg)
 	for i, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			// Setup Path logic (copied from provider_factory)
-			// ... (Simplified path logic for brevity, assume absolute or default works for now)
-			// In real impl, copy strict logic from provider_factory if needed
+		if _, err := os.Stat(path); err != nil {
+			continue // Skip non-existent paths
+		}
 
-			helper := antigravity.NewAuthenticator(&antigravity.OAuthConfig{
-				ClientID:     antigravity.DefaultOAuthConfig().ClientID,
-				ClientSecret: antigravity.DefaultOAuthConfig().ClientSecret,
-				Scope:        antigravity.DefaultOAuthConfig().Scope,
-				RedirectPort: antigravity.DefaultOAuthConfig().RedirectPort + i,
-				CredsDir:     filepath.Dir(path),
-				CredsFile:    filepath.Base(path),
-			})
+		helper := a.createAntigravityAuthenticator(path, i)
 
-			token, err := helper.GetToken(ctx)
-			if err != nil {
-				utils.L().Warnf("Failed to load Antigravity credential from %s: %v", path, err)
-				continue
-			}
-
-// Create Credential
-			credID := fmt.Sprintf("antigravity-%d", i)
-			cred := auth.NewCredential(credID, auth.ProviderTypeAntigravity)
-			cred.AccessToken = token
-
-			// Antigravity often needs explicit Project ID
-			// Ideally read from config or discovery
-			cred.ProjectID = "antigravity-test-project"
-
-			if expiry := helper.GetExpiryDate(); expiry > 0 {
-				cred.Expiry = time.Unix(expiry, 0)
-			} else {
-				cred.Expiry = time.Now().Add(1 * time.Hour)
-			}
-
-			// Create provider and get models
-			antigravityProvider, err := antigravity.NewProviderWithGeminiAuth(ctx, credID, helper)
-			if err != nil {
-				utils.L().Warnf("Failed to create Antigravity provider for %s: %v", credID, err)
-				// Fallback to default models
-				models := []string{"gemini-1.5-pro-002", "gemini-1.5-flash-002"}
-				registry.RegisterCredential(cred, models)
-				utils.L().Infof("Loaded Antigravity credential: %s with %d fallback models", credID, len(models))
-				continue
-			}
-
-			cred.SetProvider(antigravityProvider)
-
-			// Get models from the provider
-			models, err := antigravityProvider.ListModels(ctx)
-			if err != nil {
-				utils.L().Warnf("Failed to get models for Antigravity credential %s: %v", credID, err)
-				// Fallback to default models
-				models = []string{"gemini-1.5-pro-002", "gemini-1.5-flash-002"}
-			}
-			registry.RegisterCredential(cred, models)
-
-			utils.L().Infof("Loaded Antigravity credential: %s with %d models", credID, len(models))
+		if err := a.initializeCredential(
+			ctx,
+			i,
+			registry,
+			auth.ProviderTypeAntigravity,
+			func() (string, error) { return helper.GetToken(ctx) },
+			func(cred *auth.Credential) { a.configureAntigravityCredential(cred, helper) },
+			func(ctx context.Context, credID string) (provider.BaseProvider, error) {
+				return a.createAntigravityProvider(ctx, credID, helper)
+			},
+			a.getAntigravityDefaultModels,
+		); err != nil {
+			utils.L().Warnf("Failed to process Antigravity credential from %s: %v", path, err)
 		}
 	}
 	return nil
