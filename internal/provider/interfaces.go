@@ -68,7 +68,7 @@ type OpenAICompatibleProvider interface {
 	ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error)
 
 	// StreamChatCompletion handles a streaming chat request using OpenAI format
-	StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error)
+	StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error, error)
 }
 
 // GeminiNativeProvider is for providers using the genai package (gemini, antigravity)

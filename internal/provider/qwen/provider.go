@@ -52,19 +52,18 @@ func (p *Provider) ChatCompletion(ctx context.Context, req openai.ChatCompletion
 	return &resp, nil
 }
 
-func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error) {
+func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error, error) {
+	stream, err := p.client.CreateChatCompletionStream(ctx, req)
+	if err != nil {
+		return nil, nil, p.wrapError(err)
+	}
+
 	respChan := make(chan openai.ChatCompletionStreamResponse)
 	errChan := make(chan error, 1)
 
 	go func() {
 		defer close(respChan)
 		defer close(errChan)
-
-		stream, err := p.client.CreateChatCompletionStream(ctx, req)
-		if err != nil {
-			errChan <- p.wrapError(err)
-			return
-		}
 		defer stream.Close()
 
 		for {
@@ -75,6 +74,9 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 			default:
 				response, err := stream.Recv()
 				if err != nil {
+					if err.Error() != "EOF" {
+						errChan <- err
+					}
 					return // Stream finished or error
 				}
 				respChan <- response
@@ -82,7 +84,7 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 		}
 	}()
 
-	return respChan, errChan
+	return respChan, errChan, nil
 }
 
 func (p *Provider) ListModels(ctx context.Context) ([]string, error) {

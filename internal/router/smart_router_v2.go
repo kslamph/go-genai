@@ -7,8 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
-
+	
 	"github.com/sashabaranov/go-openai"
 	"github.com/sunbankio/omniproxy/internal/auth"
 	"github.com/sunbankio/omniproxy/internal/manager"
@@ -232,6 +231,9 @@ func (r *SmartRouterV2) executeGeminiStream(ctx context.Context, cred *auth.Cred
 	iter := client.Models.GenerateContentStream(ctx, modelName, contents, genConfig)
 	pr, pw := io.Pipe()
 
+	// Use a channel to wait for the first result or error to catch connection issues
+	firstResult := make(chan error, 1)
+
 	chunkCount := 0
 	firstItemChecked := false
 
@@ -246,6 +248,15 @@ func (r *SmartRouterV2) executeGeminiStream(ctx context.Context, cred *auth.Cred
 		}()
 
 		for resp, err := range iter {
+			if !firstItemChecked {
+				firstItemChecked = true
+				if err != nil {
+					firstResult <- err
+					return
+				}
+				firstResult <- nil // Success
+			}
+
 			if ctx.Err() != nil {
 				utils.L().Infow("Client disconnected during Gemini streaming",
 					"model", modelName,
@@ -253,36 +264,6 @@ func (r *SmartRouterV2) executeGeminiStream(ctx context.Context, cred *auth.Cred
 					"provider", string(cred.Type()),
 					"provider_name", cred.Name())
 				return
-			}
-
-			if !firstItemChecked {
-				firstItemChecked = true
-				if err != nil {
-					// Handle first-item error as SSE data
-					utils.L().Errorw("Gemini stream error on first item",
-						"model", modelName,
-						"error", err,
-						"provider", string(cred.Type()),
-						"provider_name", cred.Name())
-
-					// Determine status code roughly
-					statusCode := http.StatusInternalServerError
-					if strings.Contains(err.Error(), "429") {
-						statusCode = http.StatusTooManyRequests
-					} else if strings.Contains(err.Error(), "401") {
-						statusCode = http.StatusUnauthorized
-					}
-
-					errorResp := map[string]interface{}{
-						"error": map[string]interface{}{
-							"code":    statusCode,
-							"message": err.Error(),
-						},
-					}
-					errorBody, _ := json.Marshal(errorResp)
-					pw.Write([]byte(fmt.Sprintf("data: %s\n\n", string(errorBody))))
-					return
-				}
 			}
 
 			if err != nil {
@@ -324,7 +305,22 @@ func (r *SmartRouterV2) executeGeminiStream(ctx context.Context, cred *auth.Cred
 			chunkCount++
 			pw.Write([]byte(fmt.Sprintf("data: %s\n\n", string(data))))
 		}
+
+		// If the loop finished without any items, signal success (empty stream)
+		if !firstItemChecked {
+			firstResult <- nil
+		}
 	}()
+
+	// Wait for the first item or error
+	select {
+	case err := <-firstResult:
+		if err != nil {
+			return nil, r.mapGeminiError(err, cred)
+		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 
 	return &Response{
 		StatusCode: http.StatusOK,
@@ -433,7 +429,10 @@ func (r *SmartRouterV2) executeOpenAIStream(ctx context.Context, cred *auth.Cred
 		"provider", string(cred.Type()),
 		"provider_name", cred.Name())
 
-	respChan, errChan := openaiProvider.StreamChatCompletion(ctx, req)
+	respChan, errChan, err := openaiProvider.StreamChatCompletion(ctx, req)
+	if err != nil {
+		return nil, err
+	}
 
 	// Create a pipe to bridge the streaming response
 	pr, pw := io.Pipe()
