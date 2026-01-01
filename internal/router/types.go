@@ -10,11 +10,12 @@ import (
 
 // Request represents a unified request to be routed to the appropriate provider
 type Request struct {
-	Protocol provider.Protocol // The API protocol (OpenAI or Gemini)
-	Model    string            // The model name to use
-	Payload  interface{}       // The request payload (flexible for different protocols)
-	Headers  map[string]string // Additional headers to pass to the provider
-	IsStream bool              // Whether this is a streaming request
+	Protocol   provider.Protocol // The API protocol (OpenAI or Gemini)
+	Model      string            // The model name to use
+	Payload    interface{}       // The request payload (flexible for different protocols)
+	Headers    map[string]string // Additional headers to pass to the provider
+	IsStream   bool              // Whether this is a streaming request
+	RetryCount int               // Number of retry attempts (for internal use)
 }
 
 // Response represents a unified response from a provider

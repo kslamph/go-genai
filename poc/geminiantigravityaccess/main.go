@@ -1,13 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"time"
 
 	cloudauth "cloud.google.com/go/auth"
@@ -30,56 +26,6 @@ func (p *geminiTokenProvider) Token(ctx context.Context) (*cloudauth.Token, erro
 	}, nil
 }
 
-func discoverProjectID(ctx context.Context, authenticator *antigravity.Authenticator, baseURL string) (string, error) {
-	authenticator.ForceRefresh(ctx)
-	token, err := authenticator.GetToken(ctx)
-	if err != nil {
-		return "", err
-	}
-
-	clientMetadata := map[string]interface{}{
-		"ideType":    "IDE_UNSPECIFIED",
-		"platform":   "PLATFORM_UNSPECIFIED",
-		"pluginType": "GEMINI",
-	}
-
-	loadRequest := map[string]interface{}{
-		"cloudaicompanionProject": "",
-		"metadata":                clientMetadata,
-	}
-
-	reqBody, _ := json.Marshal(loadRequest)
-	url := fmt.Sprintf("%s/v1internal:loadCodeAssist", baseURL)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("loadCodeAssist failed (%d): %s", resp.StatusCode, string(body))
-	}
-
-	var loadResponse map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&loadResponse); err != nil {
-		return "", err
-	}
-
-	if projectID, ok := loadResponse["cloudaicompanionProject"].(string); ok && projectID != "" {
-		return projectID, nil
-	}
-
-	return "", fmt.Errorf("failed to discover project ID")
-}
-
 func main() {
 	ctx := context.Background()
 
@@ -98,16 +44,17 @@ func testGeminiCLI(ctx context.Context) {
 		return
 	}
 
-	projectID, err := discoverProjectID(ctx, authenticator, "https://cloudcode-pa.googleapis.com")
-	if err != nil {
-		log.Fatalf("Project discovery failed: %v", err)
-	}
-	fmt.Printf("Discovered Project ID: %s\n", projectID)
-
 	tokenProvider := &geminiTokenProvider{authenticator: authenticator}
 	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
 		TokenProvider: tokenProvider,
 	})
+
+	// Use the library helper for Project Discovery
+	projectID, err := genai.DiscoverCloudCodeProject(ctx, creds, genai.BackendGeminiCLI)
+	if err != nil {
+		log.Fatalf("Project discovery failed: %v", err)
+	}
+	fmt.Printf("Discovered Project ID: %s\n", projectID)
 
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Backend:     genai.BackendGeminiCLI,
@@ -118,7 +65,7 @@ func testGeminiCLI(ctx context.Context) {
 		log.Fatalf("Failed to create genai client: %v", err)
 	}
 
-	model := "gemini-2.5-flash"
+	model := "gemini-2.0-flash"
 	runTests(ctx, client, model)
 }
 
@@ -139,26 +86,24 @@ func testAntigravity(ctx context.Context) {
 		}
 	}
 
-	// For Antigravity, we can try to discover project ID too
-	projectID, err := discoverProjectID(ctx, antigravityAuth, "https://daily-cloudcode-pa.sandbox.googleapis.com")
-	if err != nil {
-		log.Printf("Antigravity Project discovery failed: %v. Using fallback.", err)
-		projectID = "antigravity-test-project"
-	}
-	fmt.Printf("Antigravity Project ID: %s\n", projectID)
-
 	tokenProvider := &geminiTokenProvider{authenticator: antigravityAuth}
 	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
 		TokenProvider: tokenProvider,
 	})
 
+	// Use the library helper for Project Discovery
+	projectID, err := genai.DiscoverCloudCodeProject(ctx, creds, genai.BackendAntigravity)
+	if err != nil {
+		log.Printf("Antigravity Project discovery failed: %v. Using fallback.", err)
+		projectID = "substantial-dragon-7kd70"
+	}
+	fmt.Printf("Antigravity Project ID: %s\n", projectID)
+
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Backend:     genai.BackendAntigravity,
 		Project:     projectID,
 		Credentials: creds,
-		HTTPOptions: genai.HTTPOptions{
-			BaseURL: "https://daily-cloudcode-pa.sandbox.googleapis.com",
-		},
+		// HTTPOptions.BaseURL is now set automatically by the library
 	})
 	if err != nil {
 		log.Fatalf("Failed to create genai client for Antigravity: %v", err)

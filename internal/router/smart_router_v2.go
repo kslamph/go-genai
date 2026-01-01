@@ -43,6 +43,14 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 		}
 	}
 
+	// Ensure credential is not nil
+	if cred == nil {
+		return nil, &provider.ProviderError{
+			StatusCode: http.StatusServiceUnavailable,
+			Message:    "No credential available for this model (all credentials may be in rate limit penalty)",
+		}
+	}
+
 	// 2. Proactive Auth Check (Lazy)
 	if err := r.authManager.EnsureValidToken(ctx, cred); err != nil {
 		utils.L().Warnf("Auth check failed for %s: %v", cred.ID, err)
@@ -70,12 +78,23 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 	// 4. Execute Request
 	resp, err := r.executeWithCredential(ctx, cred, req)
 
+	// Check retry count to prevent infinite loops
+	const maxRetries = 1
+	if req.RetryCount >= maxRetries {
+		// Already retried once, don't retry again
+		return resp, err
+	}
+
 	if err != nil {
 		// 5. Error Handling (Reactive)
 		if providerErr, ok := err.(*provider.ProviderError); ok {
-			// If 401, mark credential as "dirty" so NEXT request forces refresh
+			// If 401, attempt to refresh token and retry the request
 			if providerErr.StatusCode == http.StatusUnauthorized {
-				utils.L().Warnf("401 Unauthorized for %s. Attempting refresh.", cred.ID)
+				utils.L().Warnw("401 Unauthorized for credential, attempting token refresh",
+					"credential_id", cred.ID,
+					"provider", string(cred.Type()),
+					"error", err)
+
 				refreshErr := r.authManager.ForceRefresh(ctx, cred)
 				if refreshErr != nil {
 					// If refresh fails with 401, the credential is permanently revoked
@@ -91,7 +110,29 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 					}
 					return nil, refreshErr
 				}
-				_ = r.authManager.RefreshClient(ctx, cred)
+
+				// Token refresh succeeded, now refresh the client for Gemini/Antigravity
+				if cred.ProviderType == auth.ProviderTypeGemini || cred.ProviderType == auth.ProviderTypeAntigravity {
+					utils.L().Infow("Token refreshed successfully, refreshing client",
+						"credential_id", cred.ID,
+						"provider", string(cred.Type()))
+					if clientErr := r.authManager.RefreshClient(ctx, cred); clientErr != nil {
+						utils.L().Errorw("Failed to refresh client after token refresh",
+							"credential_id", cred.ID,
+							"provider", string(cred.Type()),
+							"error", clientErr)
+						return nil, clientErr
+					}
+				}
+
+				// Increment retry count and retry the request with refreshed token
+				req.RetryCount++
+				utils.L().Infow("Retrying request with refreshed token",
+					"credential_id", cred.ID,
+					"provider", string(cred.Type()),
+					"model", req.Model,
+					"retry_count", req.RetryCount)
+				return r.executeWithCredential(ctx, cred, req)
 			}
 
 			// If 429, update credential state for rate limiting
@@ -599,13 +640,45 @@ func (r *SmartRouterV2) parseGeminiConfig(configInterface interface{}) (*genai.G
 
 func (r *SmartRouterV2) mapGeminiError(err error, cred *auth.Credential) *provider.ProviderError {
 	statusCode := http.StatusInternalServerError
+	message := err.Error()
+	statusStr := ""
+	var details interface{} = nil
+	
 	if apiErr, ok := err.(*genai.APIError); ok {
+		// Use the HTTP status code from the API error
 		statusCode = apiErr.Code
+		// Preserve the original error message from the API
+		message = apiErr.Message
+		// Preserve the status string (e.g., "RESOURCE_EXHAUSTED")
+		statusStr = apiErr.Status
+		
+		// Preserve error details if available
+		if len(apiErr.Details) > 0 {
+			details = apiErr.Details
+		}
+		
+		// If the status code is 500 but the error message indicates a different status (like 429),
+		// try to parse the actual status from the error message
+		// genai.APIError sometimes returns 500 for all errors, with the real status in the message
+		if statusCode == http.StatusInternalServerError {
+			// Check if the message contains "Error XXX" pattern
+			var extractedCode int
+			n, _ := fmt.Sscanf(message, "Error %d", &extractedCode)
+			if n == 1 && extractedCode >= 400 && extractedCode < 600 {
+				statusCode = extractedCode
+			}
+		}
+	}
+	
+	// If we have a status string, append it to the message for clarity
+	if statusStr != "" {
+		message = fmt.Sprintf("%s, Status: %s", message, statusStr)
 	}
 	
 	return &provider.ProviderError{
 		StatusCode: statusCode,
-		Message:    err.Error(),
+		Message:    message,
+		Details:    details,
 		Provider:   string(cred.Type()),
 	}
 }

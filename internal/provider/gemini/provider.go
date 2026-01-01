@@ -1,12 +1,8 @@
 package gemini
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 
 	cloudauth "cloud.google.com/go/auth"
 	"github.com/sunbankio/omniproxy/internal/provider"
@@ -26,18 +22,18 @@ type GeminiProvider struct {
 
 // NewProvider creates a new Gemini provider with auth
 func NewProvider(ctx context.Context, name string, auth *Authenticator) (*GeminiProvider, error) {
-	// 1. Discover Project ID
-	projectID, err := DiscoverProjectID(ctx, auth, CloudCodeBaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to discover project ID: %w", err)
-	}
-
-	// 2. Create GenAI Client
+	// 1. Discover Project ID using the official Google library method
 	tokenProvider := &TokenProvider{authenticator: auth}
 	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
 		TokenProvider: tokenProvider,
 	})
 
+	projectID, err := genai.DiscoverCloudCodeProject(ctx, creds, genai.BackendGeminiCLI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover project ID: %w", err)
+	}
+
+	// 2. Create GenAI Client
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		Backend:     genai.BackendGeminiCLI,
 		Project:     projectID,
@@ -77,17 +73,17 @@ func (p *GeminiProvider) GetAuth() *Authenticator {
 // RefreshClient recreates the genai.Client with fresh credentials after token refresh
 // This is necessary because genai.Client caches tokens internally and doesn't automatically pick up refreshed tokens
 func (p *GeminiProvider) RefreshClient(ctx context.Context) (*genai.Client, error) {
-	// Discover Project ID (it shouldn't change, but we need it for the new client)
-	projectID, err := DiscoverProjectID(ctx, p.auth, CloudCodeBaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to discover project ID during client refresh: %w", err)
-	}
-
 	// Create new TokenProvider with the refreshed authenticator
 	tokenProvider := &TokenProvider{authenticator: p.auth}
 	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
 		TokenProvider: tokenProvider,
 	})
+
+	// Discover Project ID using the official Google library method
+	projectID, err := genai.DiscoverCloudCodeProject(ctx, creds, genai.BackendGeminiCLI)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover project ID during client refresh: %w", err)
+	}
 
 	// Create new genai.Client with fresh credentials
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
@@ -133,94 +129,4 @@ func (p *GeminiProvider) SupportsModel(model string) bool {
 		}
 	}
 	return false
-}
-
-// createDiscoveryRequest creates the HTTP request for project ID discovery
-func createDiscoveryRequest(ctx context.Context, baseURL, token string) (*http.Request, error) {
-	clientMetadata := map[string]interface{}{
-		"ideType":    "IDE_UNSPECIFIED",
-		"platform":   "PLATFORM_UNSPECIFIED",
-		"pluginType": "GEMINI",
-	}
-
-	loadRequest := map[string]interface{}{
-		"cloudaicompanionProject": "",
-		"metadata":                clientMetadata,
-	}
-
-	reqBody, err := json.Marshal(loadRequest)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	url := fmt.Sprintf("%s/v1internal:loadCodeAssist", baseURL)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	return req, nil
-}
-
-// parseDiscoveryResponse parses the HTTP response to extract the project ID
-func parseDiscoveryResponse(resp *http.Response) (string, error) {
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("loadCodeAssist failed (%d): %s", resp.StatusCode, string(body))
-	}
-
-	var loadResponse map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&loadResponse); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if projectID, ok := loadResponse["cloudaicompanionProject"].(string); ok && projectID != "" {
-		return projectID, nil
-	}
-
-	return "", fmt.Errorf("failed to discover project ID: response missing project ID")
-}
-
-// DiscoverProjectID helps find the project ID needed for Gemini API
-func DiscoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
-	// Retry loop for handling 401 Unauthenticated
-	for attempt := 0; attempt < 2; attempt++ {
-		token, err := authenticator.GetToken(ctx)
-		if err != nil {
-			return "", fmt.Errorf("failed to get token: %w", err)
-		}
-
-		req, err := createDiscoveryRequest(ctx, baseURL, token)
-		if err != nil {
-			return "", err
-		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("failed to send request: %w", err)
-		}
-
-		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
-			// 401 Unauthenticated - try to refresh token and retry
-			_ = resp.Body.Close()
-			if err := authenticator.ForceRefresh(ctx); err != nil {
-				return "", fmt.Errorf("failed to force refresh token: %w", err)
-			}
-			continue
-		}
-
-		projectID, err := parseDiscoveryResponse(resp)
-		if err != nil {
-			return "", err
-		}
-		return projectID, nil
-	}
-
-	return "", fmt.Errorf("failed to discover project ID after retries")
 }

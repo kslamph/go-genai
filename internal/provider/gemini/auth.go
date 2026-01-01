@@ -81,6 +81,11 @@ type TokenProvider struct {
 	authenticator *Authenticator
 }
 
+// NewTokenProvider creates a new TokenProvider from an Authenticator
+func NewTokenProvider(auth *Authenticator) *TokenProvider {
+	return &TokenProvider{authenticator: auth}
+}
+
 func (p *TokenProvider) Token(ctx context.Context) (*cloudauth.Token, error) {
 	token, err := p.authenticator.GetToken(ctx)
 	if err != nil {

@@ -1,7 +1,6 @@
 package antigravity
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -68,11 +67,16 @@ func (p *AntigravityProvider) refreshModelCache(ctx context.Context) {
 
 // NewProvider creates a new Antigravity provider with auth
 func NewProvider(ctx context.Context, name string, auth *Authenticator) (*AntigravityProvider, error) {
-	// 1. Discover Project ID
-	projectID, err := discoverProjectID(ctx, auth, AntigravityBaseURL, false)
+	// 1. Discover Project ID using the official Google library method (same as POC)
+	tokenProvider := &TokenProvider{authenticator: auth}
+	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
+		TokenProvider: tokenProvider,
+	})
+
+	projectID, err := genai.DiscoverCloudCodeProject(ctx, creds, genai.BackendAntigravity)
 	if err != nil {
 		// Fallback as seen in POC
-		projectID = "antigravity-test-project"
+		projectID = "substantial-dragon-7kd70"
 	}
 
 	provider := &AntigravityProvider{
@@ -104,14 +108,20 @@ func NewProviderWithGeminiAuth(ctx context.Context, name string, auth *Authentic
 			"provider", name,
 			"creds_path", auth.GetCredentialsPath())
 
-		discoveredID, err := discoverProjectID(ctx, auth, AntigravityBaseURL, true)
+		// Use the official Google library method for project discovery (same as POC)
+		tokenProvider := &TokenProvider{authenticator: auth}
+		creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
+			TokenProvider: tokenProvider,
+		})
+
+		discoveredID, err := genai.DiscoverCloudCodeProject(ctx, creds, genai.BackendAntigravity)
 		if err != nil {
 			// Fallback as seen in POC
 			utils.L().Warnw("Failed to discover project ID, using fallback",
 				"provider", name,
 				"error", err,
-				"fallback_project", "antigravity-test-project")
-			projectID = "antigravity-test-project"
+				"fallback_project", "substantial-dragon-7kd70")
+			projectID = "substantial-dragon-7kd70"
 		} else {
 			projectID = discoveredID
 			utils.L().Infow("Successfully discovered project ID",
@@ -183,13 +193,19 @@ func (p *AntigravityProvider) RefreshClient(ctx context.Context) (*genai.Client,
 	// Get Project ID (use stored or discover)
 	projectID := p.auth.GetProjectID()
 	if projectID == "" {
-		discoveredID, err := discoverProjectID(ctx, p.auth, AntigravityBaseURL, true)
+		// Use the official Google library method for project discovery (same as POC)
+		tokenProvider := &TokenProvider{authenticator: p.auth}
+		creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
+			TokenProvider: tokenProvider,
+		})
+
+		discoveredID, err := genai.DiscoverCloudCodeProject(ctx, creds, genai.BackendAntigravity)
 		if err != nil {
 			// Fallback as seen in POC
 			utils.L().Warnw("Failed to discover project ID during client refresh, using fallback",
 				"provider", p.name,
 				"error", err)
-			projectID = "antigravity-test-project"
+			projectID = "substantial-dragon-7kd70"
 		} else {
 			projectID = discoveredID
 		}
@@ -317,71 +333,4 @@ func (p *AntigravityProvider) SupportsModel(model string) bool {
 		}
 	}
 	return false
-}
-
-func discoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string, forceRefresh bool) (string, error) {
-	if forceRefresh {
-		authenticator.ForceRefresh(ctx)
-	}
-
-	for attempt := 0; attempt < 2; attempt++ {
-		token, err := authenticator.GetToken(ctx)
-		if err != nil {
-			return "", err
-		}
-
-		clientMetadata := map[string]interface{}{
-			"ideType":    "IDE_UNSPECIFIED",
-			"platform":   "PLATFORM_UNSPECIFIED",
-			"pluginType": "GEMINI",
-		}
-
-		loadRequest := map[string]interface{}{
-			"cloudaicompanionProject": "",
-			"metadata":                clientMetadata,
-		}
-
-		reqBody, _ := json.Marshal(loadRequest)
-		url := fmt.Sprintf("%s/v1internal:loadCodeAssist", baseURL)
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
-		if err != nil {
-			return "", err
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return "", err
-		}
-
-		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
-			_ = resp.Body.Close()
-			if err := authenticator.ForceRefresh(ctx); err != nil {
-				return "", fmt.Errorf("failed to force refresh token: %w", err)
-			}
-			continue
-		}
-
-		defer func() {
-			_ = resp.Body.Close()
-		}()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			return "", fmt.Errorf("loadCodeAssist failed (%d): %s", resp.StatusCode, string(body))
-		}
-
-		var loadResponse map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&loadResponse); err != nil {
-			return "", err
-		}
-
-		if projectID, ok := loadResponse["cloudaicompanionProject"].(string); ok && projectID != "" {
-			return projectID, nil
-		}
-
-		return "", fmt.Errorf("failed to discover project ID: response missing project ID")
-	}
-	return "", fmt.Errorf("failed to discover project ID after retries")
 }

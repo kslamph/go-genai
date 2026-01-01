@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	cloudauth "cloud.google.com/go/auth"
 	"github.com/sunbankio/omniproxy/internal/auth"
 	"github.com/sunbankio/omniproxy/internal/config"
 	"github.com/sunbankio/omniproxy/internal/provider"
@@ -16,6 +17,7 @@ import (
 	"github.com/sunbankio/omniproxy/internal/provider/iflow"
 	"github.com/sunbankio/omniproxy/internal/provider/qwen"
 	"github.com/sunbankio/omniproxy/pkg/utils"
+	"google.golang.org/genai"
 )
 
 // CredentialInitializer defines the contract for initializing credentials
@@ -126,8 +128,13 @@ func (g *GeminiCredentialInitializer) createGeminiAuthenticator(path string, ind
 
 // configureGeminiCredential configures a Gemini credential with project ID and expiry
 func (g *GeminiCredentialInitializer) configureGeminiCredential(cred *auth.Credential, helper *gemini.Authenticator, path string) {
-	// Discover Project ID (this is critical for API access)
-	projectID, err := gemini.DiscoverProjectID(context.Background(), helper, "https://cloudcode-pa.googleapis.com")
+	// Discover Project ID using the official Google library method (this is critical for API access)
+	tokenProvider := gemini.NewTokenProvider(helper)
+	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
+		TokenProvider: tokenProvider,
+	})
+
+	projectID, err := genai.DiscoverCloudCodeProject(context.Background(), creds, genai.BackendGeminiCLI)
 	if err != nil {
 		utils.L().Warnf("Failed to discover project ID for %s: %v, using fallback", path, err)
 		projectID = "genai-genesis" // Fallback
@@ -215,9 +222,18 @@ func (a *AntigravityCredentialInitializer) createAntigravityAuthenticator(path s
 
 // configureAntigravityCredential configures an Antigravity credential with project ID and expiry
 func (a *AntigravityCredentialInitializer) configureAntigravityCredential(cred *auth.Credential, helper *antigravity.Authenticator) {
-	// Antigravity often needs explicit Project ID
-	// Ideally read from config or discovery
-	cred.ProjectID = "antigravity-test-project"
+	// Discover Project ID using the official Google library method (this is critical for API access)
+	tokenProvider := antigravity.NewTokenProvider(helper)
+	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
+		TokenProvider: tokenProvider,
+	})
+
+	projectID, err := genai.DiscoverCloudCodeProject(context.Background(), creds, genai.BackendAntigravity)
+	if err != nil {
+		utils.L().Warnf("Failed to discover project ID for Antigravity: %v, using fallback", err)
+		projectID = "substantial-dragon-7kd70" // Fallback to your actual project
+	}
+	cred.ProjectID = projectID
 
 	if expiry := helper.GetExpiryDate(); expiry > 0 {
 		cred.Expiry = time.Unix(expiry, 0)

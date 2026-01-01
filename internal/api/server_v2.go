@@ -595,13 +595,20 @@ func (s *ServerV2) handleError(w http.ResponseWriter, err error) {
 	if pErr, ok := err.(*provider.ProviderError); ok {
 		utils.L().Warnf("Request failed: %v", pErr)
 		
-		// Gemini Error Format
+		// Build error response preserving original details if available
+		errorMap := map[string]interface{}{
+			"code":    pErr.StatusCode,
+			"message": pErr.Message,
+			"status":  http.StatusText(pErr.StatusCode),
+		}
+		
+		// Include details if they were preserved from the original error
+		if pErr.Details != nil {
+			errorMap["details"] = pErr.Details
+		}
+		
 		errResp := map[string]interface{}{
-			"error": map[string]interface{}{
-				"code":    pErr.StatusCode,
-				"message": pErr.Message,
-				"status":  http.StatusText(pErr.StatusCode),
-			},
+			"error": errorMap,
 		}
 		
 		w.Header().Set("Content-Type", "application/json")
