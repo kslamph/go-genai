@@ -18,11 +18,16 @@ package genai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
+	"math/rand"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 func blobToMldev(fromObject map[string]any, parentObject map[string]any) (toObject map[string]any, err error) {
@@ -5378,11 +5383,13 @@ func generateContentResponseFromGeminiCLI(fromObject map[string]any, parentObjec
 }
 
 func generateContentParametersToAntigravity(ac *apiClient, fromObject map[string]any, parentObject map[string]any) (map[string]any, error) {
+
 	// Antigravity is similar to Gemini CLI but might have different wrapping or extra fields
 	mldevParams, err := generateContentParametersToMldev(ac, fromObject, parentObject)
 	if err != nil {
 		return nil, err
 	}
+	mldevParams["sessionId"] = generateSessionID()
 
 	modelID := ""
 	if urlParams, ok := mldevParams["_url"].(map[string]any); ok {
@@ -5394,18 +5401,25 @@ func generateContentParametersToAntigravity(ac *apiClient, fromObject map[string
 	// Antigravity requires a requestId and sessionId
 	// We can generate them here or leave them to be handled by the backend if it supports it.
 	// Looking at provider/antigravity/antigravity.go, it generates them.
-	
+
 	toObject := map[string]any{
-		"model":   modelID,
-		"project": ac.clientConfig.Project,
-		"request": mldevParams,
+		"model":     modelID,
+		"project":   ac.clientConfig.Project,
+		"request":   mldevParams,
 		"userAgent": "antigravity",
-		"_url": map[string]any{
-			"model": "",
-		},
+		// "_url": map[string]any{
+		// 	"model": "",
+		// },
+		"requestId": generateRequestID(),
 	}
 
 	return toObject, nil
+}
+
+func prettyPrintJSON(data interface{}) {
+	if bytes, err := json.MarshalIndent(data, "", "  "); err == nil {
+		fmt.Println(string(bytes))
+	}
 }
 
 func generateContentResponseFromAntigravity(fromObject map[string]any, parentObject map[string]any) (map[string]any, error) {
@@ -5419,3 +5433,11 @@ func generateContentResponseFromAntigravity(fromObject map[string]any, parentObj
 	return generateContentResponseFromMldev(fromObject, parentObject)
 }
 
+func generateRequestID() string {
+	return "agent-" + uuid.New().String()
+}
+
+func generateSessionID() string {
+	n := rand.Int63n(9000000000000000000)
+	return "session-" + strconv.FormatInt(n, 10)
+}

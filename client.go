@@ -221,13 +221,6 @@ func NewClient(ctx context.Context, cc *ClientConfig) (*Client, error) {
 			} else {
 				cc.Backend = BackendGeminiAPI
 			}
-		} else if v, ok := envVars["GOOGLE_GENAI_USE_ANTIGRAVITY"]; ok {
-			v = strings.ToLower(v)
-			if v == "1" || v == "true" {
-				cc.Backend = BackendAntigravity
-			} else {
-				cc.Backend = BackendGeminiAPI
-			}
 		} else {
 			cc.Backend = BackendGeminiAPI
 		}
