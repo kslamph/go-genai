@@ -207,6 +207,9 @@ func (m *Manager) refreshIFlowToken(ctx context.Context, cred *Credential) error
 	// Get token which handles refresh internally
 	token, err := auth.GetToken(ctx)
 	if err != nil {
+		utils.L().Errorw("Failed to refresh iFlow token",
+			"credential_id", cred.ID,
+			"error", err)
 		return fmt.Errorf("failed to refresh iFlow token: %w", err)
 	}
 
@@ -232,6 +235,9 @@ func (m *Manager) refreshQwenToken(ctx context.Context, cred *Credential) error 
 	// Get token which handles refresh internally
 	token, err := auth.GetToken(ctx)
 	if err != nil {
+		utils.L().Errorw("Failed to refresh Qwen token",
+			"credential_id", cred.ID,
+			"error", err)
 		return fmt.Errorf("failed to refresh Qwen token: %w", err)
 	}
 
@@ -256,6 +262,9 @@ func (m *Manager) refreshAntigravityToken(ctx context.Context, cred *Credential)
 
 	// Force refresh the token
 	if err := auth.ForceRefresh(ctx); err != nil {
+		utils.L().Errorw("Failed to refresh Antigravity token",
+			"credential_id", cred.ID,
+			"error", err)
 		return fmt.Errorf("failed to refresh Antigravity token: %w", err)
 	}
 
@@ -266,6 +275,9 @@ func (m *Manager) refreshAntigravityToken(ctx context.Context, cred *Credential)
 	// Get the refreshed token
 	token, err := auth.GetToken(ctx)
 	if err != nil {
+		utils.L().Errorw("Failed to get refreshed Antigravity token",
+			"credential_id", cred.ID,
+			"error", err)
 		return fmt.Errorf("failed to get refreshed Antigravity token: %w", err)
 	}
 

@@ -527,7 +527,6 @@ func (r *SmartRouterV2) executeOpenAIStream(ctx context.Context, cred *auth.Cred
 			case resp, ok := <-respChan:
 				if !ok {
 					// Stream ended - provider has finished sending all data
-					utils.L().Infow("respChan closed, stream complete (V2)", "model", req.Model, "total_chunks", chunkCount, "provider", string(cred.Type()), "provider_name", cred.Name())
 					return
 				}
 

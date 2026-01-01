@@ -185,11 +185,6 @@ func (a *Authenticator) loadCredentials() (*Credentials, error) {
 			creds.Expire = creds.ExpiresAt
 		}
 
-		// If we have access token but no API key, try to fetch user info
-		if creds.APIKey == "" && creds.AccessToken != "" {
-			// In a real load, we might want to avoid network calls, but for now we follow existing logic
-			// a.fetchUserInfo()
-		}
 		return creds, nil
 	}
 
@@ -230,7 +225,7 @@ func (a *Authenticator) marshalCredentials() ([]byte, error) {
 
 		return json.MarshalIndent(fileCreds, "", "  ")
 	}
-	
+
 	return json.MarshalIndent(a.credentials, "", "  ")
 }
 
