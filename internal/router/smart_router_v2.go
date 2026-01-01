@@ -52,6 +52,11 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 	// 1. Select Credential
 	cred, err := r.selectCredential(req)
 	if err != nil {
+		// If it's already a ProviderError, return it as-is to preserve the status code
+		if pErr, ok := err.(*provider.ProviderError); ok {
+			return nil, pErr
+		}
+		// Otherwise, wrap it in a 503 error
 		return nil, &provider.ProviderError{
 			StatusCode: http.StatusServiceUnavailable,
 			Message:    fmt.Sprintf("No credential available: %v", err),
