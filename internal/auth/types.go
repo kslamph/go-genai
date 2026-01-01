@@ -170,9 +170,12 @@ func (c *Credential) SupportsModel(model string) bool {
 		return provider.SupportsModel(model)
 	}
 	
-	// TODO: Implement based on credential type when provider is not available
-	// For now, return true as a placeholder
-	return true
+	// In V2, providers should always be set. If provider is nil, return false.
+	utils.L().Warnw("SupportsModel called but no provider available",
+		"credential_id", c.ID,
+	"provider_type", c.ProviderType,
+		"model", model)
+	return false
 }
 
 // GetClient returns a client from the credential's client pool
