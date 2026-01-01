@@ -135,38 +135,75 @@ func (p *GeminiProvider) SupportsModel(model string) bool {
 	return false
 }
 
+// createDiscoveryRequest creates the HTTP request for project ID discovery
+func createDiscoveryRequest(ctx context.Context, baseURL, token string) (*http.Request, error) {
+	clientMetadata := map[string]interface{}{
+		"ideType":    "IDE_UNSPECIFIED",
+		"platform":   "PLATFORM_UNSPECIFIED",
+		"pluginType": "GEMINI",
+	}
+
+	loadRequest := map[string]interface{}{
+		"cloudaicompanionProject": "",
+		"metadata":                clientMetadata,
+	}
+
+	reqBody, err := json.Marshal(loadRequest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/v1internal:loadCodeAssist", baseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	return req, nil
+}
+
+// parseDiscoveryResponse parses the HTTP response to extract the project ID
+func parseDiscoveryResponse(resp *http.Response) (string, error) {
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("loadCodeAssist failed (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var loadResponse map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&loadResponse); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if projectID, ok := loadResponse["cloudaicompanionProject"].(string); ok && projectID != "" {
+		return projectID, nil
+	}
+
+	return "", fmt.Errorf("failed to discover project ID: response missing project ID")
+}
+
 // DiscoverProjectID helps find the project ID needed for Gemini API
 func DiscoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
 	// Retry loop for handling 401 Unauthenticated
 	for attempt := 0; attempt < 2; attempt++ {
 		token, err := authenticator.GetToken(ctx)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("failed to get token: %w", err)
 		}
 
-		clientMetadata := map[string]interface{}{
-			"ideType":    "IDE_UNSPECIFIED",
-			"platform":   "PLATFORM_UNSPECIFIED",
-			"pluginType": "GEMINI",
-		}
-
-		loadRequest := map[string]interface{}{
-			"cloudaicompanionProject": "",
-			"metadata":                clientMetadata,
-		}
-
-		reqBody, _ := json.Marshal(loadRequest)
-		url := fmt.Sprintf("%s/v1internal:loadCodeAssist", baseURL)
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+		req, err := createDiscoveryRequest(ctx, baseURL, token)
 		if err != nil {
 			return "", err
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("failed to send request: %w", err)
 		}
 
 		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
@@ -178,25 +215,11 @@ func DiscoverProjectID(ctx context.Context, authenticator *Authenticator, baseUR
 			continue
 		}
 
-		defer func() {
-			_ = resp.Body.Close()
-		}()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			return "", fmt.Errorf("loadCodeAssist failed (%d): %s", resp.StatusCode, string(body))
-		}
-
-		var loadResponse map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&loadResponse); err != nil {
+		projectID, err := parseDiscoveryResponse(resp)
+		if err != nil {
 			return "", err
 		}
-
-		if projectID, ok := loadResponse["cloudaicompanionProject"].(string); ok && projectID != "" {
-			return projectID, nil
-		}
-
-		return "", fmt.Errorf("failed to discover project ID: response missing project ID")
+		return projectID, nil
 	}
 
 	return "", fmt.Errorf("failed to discover project ID after retries")

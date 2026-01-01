@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 	"golang.org/x/oauth2"
 
@@ -154,25 +155,107 @@ func (a *Authenticator) loadCredentials() (*Credentials, error) {
 }
 
 // saveCredentials saves credentials to file
-func (a *Authenticator) saveCredentials(creds *Credentials) error {
+func (a *Authenticator) saveCredentials(creds Credentials) error {
 	credsPath := a.GetCredentialsPath()
+	lockPath := credsPath + ".lock"
 
-	// Create directory if it doesn't exist
+	// Create the directory if it doesn't exist
 	dir := filepath.Dir(credsPath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("failed to create credentials directory: %w", err)
+		return fmt.Errorf("failed to create credentials directory: %v", err)
 	}
 
-	data, err := json.MarshalIndent(creds, "", "  ")
+	// Use a file lock to prevent race conditions
+	fileLock := flock.New(lockPath)
+	locked, err := fileLock.TryLock()
 	if err != nil {
-		return fmt.Errorf("failed to marshal credentials: %w", err)
+		return fmt.Errorf("failed to acquire file lock: %v", err)
 	}
+	if !locked {
+		return fmt.Errorf("failed to acquire file lock, another process is holding it")
+	}
+	defer fileLock.Unlock()
 
-	if err := os.WriteFile(credsPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write credentials file: %w", err)
+	// Create or overwrite the file
+	file, err := os.Create(credsPath)
+	if err != nil {
+		return fmt.Errorf("failed to create credentials file: %v", err)
+	}
+	defer file.Close()
+
+	// Encode and write the credentials
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(creds); err != nil {
+		return fmt.Errorf("failed to encode credentials: %v", err)
 	}
 
 	return nil
+}
+
+// IsTokenValid checks if the token is still valid
+func IsTokenValid(credentials Credentials) bool {
+	if credentials.ExpiryDate == 0 {
+		return false
+	}
+	// Add 30 second buffer. TokenRefreshBufferMs is defined in constants.go
+	return time.Now().UnixMilli() < credentials.ExpiryDate-TokenRefreshBufferMs
+}
+
+// refreshAccessToken refreshes the OAuth token using the refresh token
+func (a *Authenticator) refreshAccessToken(credentials Credentials) (Credentials, error) {
+	if credentials.RefreshToken == "" {
+		return Credentials{}, fmt.Errorf("no refresh token available")
+	}
+
+	conf := &oauth2.Config{
+		ClientID:     a.config.ClientID,
+		ClientSecret: a.config.ClientSecret,
+		Endpoint: oauth2.Endpoint{
+			TokenURL: "https://oauth2.googleapis.com/token",
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	token := &oauth2.Token{
+		RefreshToken: credentials.RefreshToken,
+	}
+
+	tokenSource := conf.TokenSource(ctx, token)
+	newToken, err := tokenSource.Token()
+	if err != nil {
+		// Check if this is a 401 error (invalid credentials)
+		errStr := err.Error()
+		if strings.Contains(errStr, "401") || strings.Contains(errStr, "unauthorized") {
+			a.isValid = false
+			utils.L().Errorw("Token refresh failed with 401 - credentials are invalid/revoked. Provider marked as invalid.",
+				"provider", "Gemini",
+				"creds_path", a.config.CredsPath,
+				"error", err)
+			return Credentials{}, fmt.Errorf("credentials are invalid (401). Please re-authenticate: %w", err)
+		}
+		return Credentials{}, fmt.Errorf("failed to refresh token: %w", err)
+	}
+
+	updatedCredentials := Credentials{
+		AccessToken:  newToken.AccessToken,
+		TokenType:    newToken.TokenType,
+		RefreshToken: newToken.RefreshToken,
+		ExpiryDate:   newToken.Expiry.UnixMilli(),
+	}
+
+	// Scope might update
+	if extraScope, ok := newToken.Extra("scope").(string); ok && extraScope != "" {
+		updatedCredentials.Scope = extraScope
+	}
+
+	if err := a.saveCredentials(updatedCredentials); err != nil {
+		return Credentials{}, fmt.Errorf("failed to save updated credentials: %v", err)
+	}
+
+	return updatedCredentials, nil
 }
 
 // GetToken returns a valid access token, refreshing if necessary
@@ -194,57 +277,14 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 		a.credentials = creds
 	}
 
-	// Convert to oauth2.Token
-	token := &oauth2.Token{
-		AccessToken:  a.credentials.AccessToken,
-		RefreshToken: a.credentials.RefreshToken,
-		TokenType:    a.credentials.TokenType,
-		Expiry:       time.Unix(a.credentials.ExpiryDate, 0),
+	// Check if token is valid
+	if IsTokenValid(*a.credentials) {
+		return a.credentials.AccessToken, nil
 	}
 
-	// 30 minute buffer
-	buffer := time.Duration(TokenRefreshBufferMs) * time.Millisecond
-
-	// Setup OAuth2 config
-	conf := &oauth2.Config{
-		ClientID:     a.config.ClientID,
-		ClientSecret: a.config.ClientSecret,
-		Scopes:       []string{a.config.Scope},
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  "https://accounts.google.com/o/oauth2/v2/auth",
-			TokenURL: "https://oauth2.googleapis.com/token",
-		},
-	}
-
-	// Create a context with the custom HTTP client
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, a.httpClient)
-
-	// Check if we need to force refresh (if within buffer or expired)
-	if time.Until(token.Expiry) < buffer {
-		utils.L().Infow("Token expiring in less than 30m or expired, forcing refresh",
-			"provider", "Gemini",
-			"creds_path", a.config.CredsPath)
-		// Trick ReuseTokenSource by making the token look expired
-		token.Expiry = time.Now().Add(-1 * time.Second)
-	}
-
-	// Create TokenSource
-	ts := conf.TokenSource(ctx, token)
-
-	// Get token (this will refresh if needed/forced)
-	newToken, err := ts.Token()
+	// Token is invalid, try to refresh
+	updatedCreds, err := a.refreshAccessToken(*a.credentials)
 	if err != nil {
-		// Check if this is a 401 error (invalid credentials)
-		errStr := err.Error()
-		if strings.Contains(errStr, "401") || strings.Contains(errStr, "unauthorized") {
-			a.isValid = false
-			utils.L().Errorw("Token refresh failed with 401 - credentials are invalid/revoked. Provider marked as invalid.",
-				"provider", "Gemini",
-				"creds_path", a.config.CredsPath,
-				"error", err)
-			return "", fmt.Errorf("credentials are invalid (401). Please re-authenticate: %w", err)
-		}
-
 		utils.L().Errorw("Token refresh failed",
 			"provider", "Gemini",
 			"creds_path", a.config.CredsPath,
@@ -254,30 +294,11 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	// Check if token changed or was refreshed
-	if newToken.AccessToken != a.credentials.AccessToken || newToken.RefreshToken != a.credentials.RefreshToken {
-		utils.L().Infow("Token refreshed successfully, saving credentials",
-			"provider", "Gemini",
-			"creds_path", a.config.CredsPath)
+	utils.L().Infow("Token refreshed successfully",
+		"provider", "Gemini",
+		"creds_path", a.config.CredsPath)
 
-		a.credentials.AccessToken = newToken.AccessToken
-		// ReuseTokenSource ensures RefreshToken is preserved if not returned
-		a.credentials.RefreshToken = newToken.RefreshToken
-		a.credentials.TokenType = newToken.TokenType
-		a.credentials.ExpiryDate = newToken.Expiry.Unix()
-		// Scope might update
-		if extraScope, ok := newToken.Extra("scope").(string); ok && extraScope != "" {
-			a.credentials.Scope = extraScope
-		}
-
-		if err := a.saveCredentials(a.credentials); err != nil {
-			utils.L().Errorw("Failed to save refreshed credentials",
-				"provider", "Gemini",
-				"creds_path", a.config.CredsPath,
-				"error", err)
-		}
-	}
-
+	a.credentials = &updatedCreds
 	return a.credentials.AccessToken, nil
 }
 
@@ -323,7 +344,7 @@ func (a *Authenticator) ForceRefresh(ctx context.Context) error {
 	a.credentials.TokenType = newToken.TokenType
 	a.credentials.ExpiryDate = newToken.Expiry.Unix()
 
-	if err := a.saveCredentials(a.credentials); err != nil {
+	if err := a.saveCredentials(*a.credentials); err != nil {
 		utils.L().Errorw("Failed to save refreshed credentials",
 			"provider", "Gemini",
 			"error", err)
@@ -465,7 +486,7 @@ func (a *Authenticator) exchangeCodeForTokens(ctx context.Context, code, redirec
 	a.mu.Unlock()
 
 	// Save credentials
-	if err := a.saveCredentials(a.credentials); err != nil {
+	if err := a.saveCredentials(*a.credentials); err != nil {
 		return fmt.Errorf("failed to save credentials: %w", err)
 	}
 

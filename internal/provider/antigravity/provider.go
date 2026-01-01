@@ -31,22 +31,14 @@ type AntigravityProvider struct {
 	modelsCached bool
 }
 
-// NewProvider creates a new Antigravity provider with auth
-func NewProvider(ctx context.Context, name string, auth *Authenticator) (*AntigravityProvider, error) {
-	// 1. Discover Project ID
-	projectID, err := discoverProjectID(ctx, auth, AntigravityBaseURL)
-	if err != nil {
-		// Fallback as seen in POC
-		projectID = "antigravity-test-project"
-	}
-
-	// 2. Create GenAI Client
-	tokenProvider := &TokenProvider{authenticator: auth}
+// createGenAIClient creates a new genai.Client with the given project ID
+func (p *AntigravityProvider) createGenAIClient(ctx context.Context, projectID string) (*genai.Client, error) {
+	tokenProvider := &TokenProvider{authenticator: p.auth}
 	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
 		TokenProvider: tokenProvider,
 	})
 
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+	return genai.NewClient(ctx, &genai.ClientConfig{
 		Backend:     genai.BackendAntigravity,
 		Project:     projectID,
 		Credentials: creds,
@@ -54,33 +46,49 @@ func NewProvider(ctx context.Context, name string, auth *Authenticator) (*Antigr
 			BaseURL: AntigravityBaseURL,
 		},
 	})
+}
+
+// refreshModelCache fetches and caches available models
+func (p *AntigravityProvider) refreshModelCache(ctx context.Context) {
+	models, err := p.ListModels(ctx)
+	if err == nil {
+		p.mu.Lock()
+		p.cachedModels = models
+		p.modelsCached = true
+		p.mu.Unlock()
+		utils.L().Infow("Cached available models for provider",
+			"provider", p.name,
+			"models", models)
+	} else {
+		utils.L().Warnw("Failed to fetch models for provider",
+			"provider", p.name,
+			"error", err)
+	}
+}
+
+// NewProvider creates a new Antigravity provider with auth
+func NewProvider(ctx context.Context, name string, auth *Authenticator) (*AntigravityProvider, error) {
+	// 1. Discover Project ID
+	projectID, err := discoverProjectID(ctx, auth, AntigravityBaseURL, false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create genai client: %w", err)
+		// Fallback as seen in POC
+		projectID = "antigravity-test-project"
 	}
 
 	provider := &AntigravityProvider{
-		client: client,
-		name:   name,
-		auth:   auth,
+		name: name,
+		auth: auth,
 	}
 
-	// Fetch and cache available models at startup
-	models, err := provider.ListModels(ctx)
-	if err == nil {
-		provider.mu.Lock()
-		provider.cachedModels = models
-		provider.modelsCached = true
-		provider.mu.Unlock()
-		utils.L().Infow("Cached available models for provider at startup",
-			"provider", name,
-			"project_id", projectID,
-			"models", models)
-	} else {
-		utils.L().Warnw("Failed to fetch models for provider at startup",
-			"provider", name,
-			"project_id", projectID,
-			"error", err)
+	// 2. Create GenAI Client
+	client, err := provider.createGenAIClient(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create genai client: %w", err)
 	}
+	provider.client = client
+
+	// Fetch and cache available models at startup
+	provider.refreshModelCache(ctx)
 
 	return provider, nil
 }
@@ -96,7 +104,7 @@ func NewProviderWithGeminiAuth(ctx context.Context, name string, auth *Authentic
 			"provider", name,
 			"creds_path", auth.GetCredentialsPath())
 
-		discoveredID, err := discoverProjectIDWithAuth(ctx, auth, AntigravityBaseURL)
+		discoveredID, err := discoverProjectID(ctx, auth, AntigravityBaseURL, true)
 		if err != nil {
 			// Fallback as seen in POC
 			utils.L().Warnw("Failed to discover project ID, using fallback",
@@ -124,51 +132,24 @@ func NewProviderWithGeminiAuth(ctx context.Context, name string, auth *Authentic
 			"creds_path", auth.GetCredentialsPath())
 	}
 
-	// 2. Create GenAI Client using the same token provider as POC
-	tokenProvider := &TokenProvider{authenticator: auth}
-	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
-		TokenProvider: tokenProvider,
-	})
+	provider := &AntigravityProvider{
+		name: name,
+		auth: auth,
+	}
 
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		Backend:     genai.BackendAntigravity,
-		Project:     projectID,
-		Credentials: creds,
-		HTTPOptions: genai.HTTPOptions{
-			BaseURL: AntigravityBaseURL,
-		},
-	})
+	// 2. Create GenAI Client using the same token provider as POC
+	client, err := provider.createGenAIClient(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create genai client: %w", err)
 	}
+	provider.client = client
 
 	utils.L().Infow("Successfully created Antigravity provider",
 		"provider", name,
 		"project_id", projectID)
 
-	provider := &AntigravityProvider{
-		client: client,
-		name:   name,
-		auth:   auth,
-	}
-
 	// Fetch and cache available models at startup
-	models, err := provider.ListModels(ctx)
-	if err == nil {
-		provider.mu.Lock()
-		provider.cachedModels = models
-		provider.modelsCached = true
-		provider.mu.Unlock()
-		utils.L().Infow("Cached available models for provider at startup",
-			"provider", name,
-			"project_id", projectID,
-			"models", models)
-	} else {
-		utils.L().Warnw("Failed to fetch models for provider at startup",
-			"provider", name,
-			"project_id", projectID,
-			"error", err)
-	}
+	provider.refreshModelCache(ctx)
 
 	return provider, nil
 }
@@ -202,7 +183,7 @@ func (p *AntigravityProvider) RefreshClient(ctx context.Context) (*genai.Client,
 	// Get Project ID (use stored or discover)
 	projectID := p.auth.GetProjectID()
 	if projectID == "" {
-		discoveredID, err := discoverProjectIDWithAuth(ctx, p.auth, AntigravityBaseURL)
+		discoveredID, err := discoverProjectID(ctx, p.auth, AntigravityBaseURL, true)
 		if err != nil {
 			// Fallback as seen in POC
 			utils.L().Warnw("Failed to discover project ID during client refresh, using fallback",
@@ -214,21 +195,8 @@ func (p *AntigravityProvider) RefreshClient(ctx context.Context) (*genai.Client,
 		}
 	}
 
-	// Create new TokenProvider with the refreshed authenticator
-	tokenProvider := &TokenProvider{authenticator: p.auth}
-	creds := cloudauth.NewCredentials(&cloudauth.CredentialsOptions{
-		TokenProvider: tokenProvider,
-	})
-
 	// Create new genai.Client with fresh credentials
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		Backend:     genai.BackendAntigravity,
-		Project:     projectID,
-		Credentials: creds,
-		HTTPOptions: genai.HTTPOptions{
-			BaseURL: AntigravityBaseURL,
-		},
-	})
+	client, err := p.createGenAIClient(ctx, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new genai client during refresh: %w", err)
 	}
@@ -351,72 +319,11 @@ func (p *AntigravityProvider) SupportsModel(model string) bool {
 	return false
 }
 
-func discoverProjectIDWithAuth(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
-	authenticator.ForceRefresh(ctx)
-
-	for attempt := 0; attempt < 2; attempt++ {
-		token, err := authenticator.GetToken(ctx)
-		if err != nil {
-			return "", err
-		}
-
-		clientMetadata := map[string]interface{}{
-			"ideType":    "IDE_UNSPECIFIED",
-			"platform":   "PLATFORM_UNSPECIFIED",
-			"pluginType": "GEMINI",
-		}
-
-		loadRequest := map[string]interface{}{
-			"cloudaicompanionProject": "",
-			"metadata":                clientMetadata,
-		}
-
-		reqBody, _ := json.Marshal(loadRequest)
-		url := fmt.Sprintf("%s/v1internal:loadCodeAssist", baseURL)
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
-		if err != nil {
-			return "", err
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return "", err
-		}
-
-		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
-			_ = resp.Body.Close()
-			if err := authenticator.ForceRefresh(ctx); err != nil {
-				return "", fmt.Errorf("failed to force refresh token: %w", err)
-			}
-			continue
-		}
-
-		defer func() {
-			_ = resp.Body.Close()
-		}()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			return "", fmt.Errorf("loadCodeAssist failed (%d): %s", resp.StatusCode, string(body))
-		}
-
-		var loadResponse map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&loadResponse); err != nil {
-			return "", err
-		}
-
-		if projectID, ok := loadResponse["cloudaicompanionProject"].(string); ok && projectID != "" {
-			return projectID, nil
-		}
-
-		return "", fmt.Errorf("failed to discover project ID: response missing project ID")
+func discoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string, forceRefresh bool) (string, error) {
+	if forceRefresh {
+		authenticator.ForceRefresh(ctx)
 	}
-	return "", fmt.Errorf("failed to discover project ID after retries")
-}
 
-func discoverProjectID(ctx context.Context, authenticator *Authenticator, baseURL string) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		token, err := authenticator.GetToken(ctx)
 		if err != nil {

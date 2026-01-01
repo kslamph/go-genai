@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 
 	"golang.org/x/oauth2"
@@ -143,22 +144,23 @@ func (a *Authenticator) IsAuthenticated() bool {
 
 	if a.credentials == nil {
 		// Try to load from file
-		a.loadCredentials()
-		if a.credentials == nil {
+		creds, err := a.loadCredentials()
+		if err != nil {
 			return false
 		}
+		a.credentials = creds
 	}
 
 	return a.credentials.IsValid()
 }
 
 // loadCredentials loads credentials from file
-func (a *Authenticator) loadCredentials() {
+func (a *Authenticator) loadCredentials() (*Credentials, error) {
 	credsPath := a.GetCredentialsPath()
 
 	data, err := os.ReadFile(credsPath)
 	if err != nil {
-		return
+		return nil, fmt.Errorf("failed to read credentials file: %w", err)
 	}
 
 	// Try to load as OAuthFileCredentials first (strict user format)
@@ -183,30 +185,28 @@ func (a *Authenticator) loadCredentials() {
 			creds.Expire = creds.ExpiresAt
 		}
 
-		a.credentials = creds
-
 		// If we have access token but no API key, try to fetch user info
-		if a.credentials.APIKey == "" && a.credentials.AccessToken != "" {
+		if creds.APIKey == "" && creds.AccessToken != "" {
 			// In a real load, we might want to avoid network calls, but for now we follow existing logic
 			// a.fetchUserInfo()
 		}
-		return
+		return creds, nil
 	}
 
 	// Fallback to standard loading
 	var creds Credentials
 	if err := json.Unmarshal(data, &creds); err != nil {
-		return
+		return nil, fmt.Errorf("failed to parse credentials: %w", err)
 	}
 
-	a.credentials = &creds
+	if creds.AuthType == "" {
+		creds.AuthType = "oauth"
+	}
+	if creds.Type == "" {
+		creds.Type = "iflow"
+	}
 
-	if a.credentials.AuthType == "" {
-		a.credentials.AuthType = "oauth"
-	}
-	if a.credentials.Type == "" {
-		a.credentials.Type = "iflow"
-	}
+	return &creds, nil
 }
 
 // saveCredentials saves credentials to file
@@ -216,13 +216,24 @@ func (a *Authenticator) saveCredentials() error {
 	}
 
 	credsPath := a.GetCredentialsPath()
+	lockPath := credsPath + ".lock"
 
 	if err := os.MkdirAll(filepath.Dir(credsPath), 0700); err != nil {
 		return fmt.Errorf("failed to create credentials directory: %w", err)
 	}
 
+	// Use a file lock to prevent race conditions
+	fileLock := flock.New(lockPath)
+	locked, lockErr := fileLock.TryLock()
+	if lockErr != nil {
+		return fmt.Errorf("failed to acquire file lock: %v", lockErr)
+	}
+	if !locked {
+		return fmt.Errorf("failed to acquire file lock, another process is holding it")
+	}
+	defer fileLock.Unlock()
+
 	var data []byte
-	var err error
 
 	// Use strict format for OAuth
 	if a.credentials.AuthType == "oauth" {
@@ -237,18 +248,22 @@ func (a *Authenticator) saveCredentials() error {
 		if a.credentials.ExpiryDate > 0 {
 			fileCreds.ExpiryDate = a.credentials.ExpiryDate
 		} else if a.credentials.ExpiresAt != "" {
-			if t, err := time.Parse(time.RFC3339, a.credentials.ExpiresAt); err == nil {
+			if t, parseErr := time.Parse(time.RFC3339, a.credentials.ExpiresAt); parseErr == nil {
 				fileCreds.ExpiryDate = t.UnixMilli()
 			}
 		}
 
-		data, err = json.MarshalIndent(fileCreds, "", "  ")
+		var marshalErr error
+		data, marshalErr = json.MarshalIndent(fileCreds, "", "  ")
+		if marshalErr != nil {
+			return fmt.Errorf("failed to marshal credentials: %w", marshalErr)
+		}
 	} else {
-		data, err = json.MarshalIndent(a.credentials, "", "  ")
-	}
-
-	if err != nil {
-		return fmt.Errorf("failed to marshal credentials: %w", err)
+		var marshalErr error
+		data, marshalErr = json.MarshalIndent(a.credentials, "", "  ")
+		if marshalErr != nil {
+			return fmt.Errorf("failed to marshal credentials: %w", marshalErr)
+		}
 	}
 
 	if err := os.WriteFile(credsPath, data, 0600); err != nil {
@@ -258,6 +273,68 @@ func (a *Authenticator) saveCredentials() error {
 	return nil
 }
 
+// IsTokenValid checks if the token is still valid
+func IsTokenValid(credentials Credentials) bool {
+	if credentials.ExpiryDate == 0 {
+		return false
+	}
+	// Add 30 second buffer. TokenRefreshBufferMs is defined in constants.go
+	return time.Now().UnixMilli() < credentials.ExpiryDate-1800*1000 // 30 minutes
+}
+
+// refreshAccessToken refreshes the OAuth token using the refresh token
+func (a *Authenticator) refreshAccessToken(credentials Credentials) (Credentials, error) {
+	if credentials.RefreshToken == "" {
+		return Credentials{}, fmt.Errorf("no refresh token available")
+	}
+
+	conf := &oauth2.Config{
+		ClientID:     a.config.ClientID,
+		ClientSecret: a.config.ClientSecret,
+		Endpoint: oauth2.Endpoint{
+			TokenURL: TokenURL,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	token := &oauth2.Token{
+		RefreshToken: credentials.RefreshToken,
+	}
+
+	tokenSource := conf.TokenSource(ctx, token)
+	newToken, err := tokenSource.Token()
+	if err != nil {
+		return Credentials{}, fmt.Errorf("failed to refresh token: %w", err)
+	}
+
+	updatedCredentials := Credentials{
+		AccessToken:  newToken.AccessToken,
+		TokenType:    newToken.TokenType,
+		RefreshToken: newToken.RefreshToken,
+		ExpiryDate:   newToken.Expiry.UnixMilli(),
+	}
+
+	// Scope might update
+	if extraScope, ok := newToken.Extra("scope").(string); ok && extraScope != "" {
+		updatedCredentials.Scope = extraScope
+	}
+
+	// Fetch user info and API key after refresh
+	if err := a.fetchUserInfo(); err != nil {
+		utils.L().Errorw("Failed to fetch user info after refresh",
+			"provider", "iFlow",
+			"error", err)
+	}
+
+	if err := a.saveCredentials(); err != nil {
+		return Credentials{}, fmt.Errorf("failed to save updated credentials: %v", err)
+	}
+
+	return updatedCredentials, nil
+}
+
 // GetToken returns a valid API key for LLM calls, refreshing if necessary
 func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	a.mu.Lock()
@@ -265,7 +342,11 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 
 	// Load credentials if not loaded
 	if a.credentials == nil {
-		a.loadCredentials()
+		creds, loadErr := a.loadCredentials()
+		if loadErr != nil {
+			return "", fmt.Errorf("credentials not found: %w", loadErr)
+		}
+		a.credentials = creds
 	}
 
 	// Check if we have credentials
@@ -273,85 +354,45 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no valid credentials available")
 	}
 
-	// Convert to oauth2.Token
-	token := &oauth2.Token{
-		AccessToken:  a.credentials.AccessToken,
-		RefreshToken: a.credentials.RefreshToken,
-		TokenType:    a.credentials.TokenType,
-	}
-
-	// Parse expiry if available
-	if a.credentials.ExpiresAt != "" {
-		if expiry, err := time.Parse(time.RFC3339, a.credentials.ExpiresAt); err == nil {
-			token.Expiry = expiry
+	// Check if token is valid
+	if IsTokenValid(*a.credentials) {
+		// If we still don't have an API key, try to fetch it
+		if a.credentials.APIKey == "" {
+			if err := a.fetchUserInfo(); err != nil {
+				utils.L().Errorw("Failed to fetch API key",
+					"provider", "iFlow",
+					"error", err)
+			} else {
+				_ = a.saveCredentials()
+			}
 		}
+
+		// Return the API key for LLM calls, as requested by the user
+		if a.credentials.APIKey != "" {
+			return a.credentials.APIKey, nil
+		}
+		// Fallback to AccessToken if APIKey is still not available
+		return a.credentials.AccessToken, nil
 	}
 
-	// Setup OAuth2 config for iFlow
-	conf := &oauth2.Config{
-		ClientID:     a.config.ClientID,
-		ClientSecret: a.config.ClientSecret,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  AuthURL,
-			TokenURL: TokenURL,
-		},
-	}
-
-	// Create a context with the custom HTTP client
-	oauth2Context := context.WithValue(ctx, oauth2.HTTPClient, a.httpClient)
-
-	// Create TokenSource with the current token
-	ts := conf.TokenSource(oauth2Context, token)
-
-	// Get token (this will refresh if needed)
-	newToken, err := ts.Token()
+	// Token is invalid, try to refresh
+	updatedCreds, err := a.refreshAccessToken(*a.credentials)
 	if err != nil {
+		utils.L().Errorw("Token refresh failed",
+			"provider", "iFlow",
+			"error", err)
 		return "", fmt.Errorf("failed to refresh token: %w", err)
 	}
 
-	// Update credentials if token changed
-	if newToken.AccessToken != a.credentials.AccessToken || newToken.RefreshToken != a.credentials.RefreshToken {
-		utils.L().Infow("Token refreshed successfully, saving credentials",
-			"provider", "iFlow")
+	utils.L().Infow("Token refreshed successfully",
+		"provider", "iFlow")
 
-		a.credentials.AccessToken = newToken.AccessToken
-		a.credentials.RefreshToken = newToken.RefreshToken
-		a.credentials.TokenType = newToken.TokenType
-		if !newToken.Expiry.IsZero() {
-			a.credentials.ExpiresAt = newToken.Expiry.Format(time.RFC3339)
-			a.credentials.ExpiryDate = newToken.Expiry.UnixMilli()
-		}
-
-		// Fetch user info and API key after refresh
-		if err := a.fetchUserInfo(); err != nil {
-			utils.L().Errorw("Failed to fetch user info after refresh",
-				"provider", "iFlow",
-				"error", err)
-		}
-
-		if err := a.saveCredentials(); err != nil {
-			utils.L().Errorw("Failed to save refreshed credentials",
-				"provider", "iFlow",
-				"error", err)
-		}
-	}
-
-	// If we still don't have an API key, try to fetch it
-	if a.credentials.APIKey == "" {
-		if err := a.fetchUserInfo(); err != nil {
-			utils.L().Errorw("Failed to fetch API key",
-				"provider", "iFlow",
-				"error", err)
-		} else {
-			a.saveCredentials()
-		}
-	}
+	a.credentials = &updatedCreds
 
 	// Return the API key for LLM calls, as requested by the user
 	if a.credentials.APIKey != "" {
 		return a.credentials.APIKey, nil
 	}
-
 	// Fallback to AccessToken if APIKey is still not available
 	return a.credentials.AccessToken, nil
 }
