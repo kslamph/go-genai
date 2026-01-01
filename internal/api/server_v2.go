@@ -3,8 +3,11 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -177,6 +180,7 @@ func (s *ServerV2) setupRoutes() {
 
 	// Gemini V1Beta API
 	s.router.Route("/v1beta", func(r chi.Router) {
+		r.Get("/models", s.HandleGeminiListModels)
 		r.Post("/models/{model}:generateContent", s.HandleGeminiGenerateContent)
 		r.Post("/models/{model}:streamGenerateContent", s.HandleGeminiStreamGenerateContent)
 	})
@@ -408,20 +412,168 @@ func (s *ServerV2) HandleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Create response in OpenAI format
+	// Model specifications based on iFlow platform data for OpenAI format
+	modelSpecs := map[string]struct {
+		contextLength int
+		maxTokens     int
+		description   string
+	}{
+		"qwen3-coder-plus":           {1048576, 65536, "480B MoE coding model"},
+		"qwen3-coder-flash":          {1048576, 65536, "Fast coding model with same specs as Plus"},
+		"qwen3-vl-plus":              {262144, 32768, "Vision-language model"},
+		"qwen3-max":                  {262144, 32768, "Advanced Qwen3 model"},
+		"qwen3-max-preview":          {262144, 32768, "Preview version of Qwen3 Max"},
+		"kimi-k2-instruct-0905":      {262144, 65536, "320B MoE instruction model"},
+		"kimi-k2":                    {131072, 65536, "1T MoE foundation model"},
+		"deepseek-v3.2-exp":          {131072, 65536, "Experimental sparse attention model"},
+		"deepseek-r1":                {131072, 32768, "Reasoning-optimized model"},
+		"deepseek-v3-671b":           {131072, 32768, "671B parameter model"},
+		"glm-4.6":                    {204800, 131072, "Thinking-enabled multimodal model"},
+		"qwen3-32b":                  {131072, 32768, "32B parameter model"},
+		"qwen3-235b-a22b-thinking":   {262144, 65536, "Thinking MoE model"},
+		"qwen3-235b-a22b-instruct":   {262144, 65536, "Instruction-tuned MoE model"},
+		"qwen3-235b-a22b":            {131072, 32768, "Base MoE model"},
+		"chat_20706":                  {131072, 32768, "Chat model variant"},
+		"chat_23310":                  {131072, 32768, "Chat model variant"},
+		"rev19-uic3-1p":              {131072, 32768, "Specialized model"},
+		"gpt-oss-120b-medium":        {131072, 32768, "Open-source 120B model"},
+		"claude-opus-4-5-thinking":   {131072, 32768, "Thinking-enhanced Claude"},
+		"claude-sonnet-4-5":          {131072, 32768, "Advanced Claude model"},
+		"claude-sonnet-4-5-thinking": {131072, 32768, "Thinking-enhanced Sonnet"},
+	}
+
+	// Create response in OpenAI format with enhanced specifications
 	data := make([]map[string]interface{}, 0, len(models))
 	for _, model := range models {
-		data = append(data, map[string]interface{}{
+		modelInfo := map[string]interface{}{
 			"id":       model,
 			"object":   "model",
 			"created":  0,
 			"owned_by": "omniproxy",
-		})
+		}
+
+		// Add enhanced specifications if available
+		if spec, exists := modelSpecs[model]; exists {
+			modelInfo["context_length"] = spec.contextLength
+			modelInfo["max_tokens"] = spec.maxTokens
+			modelInfo["description"] = spec.description
+		}
+
+		data = append(data, modelInfo)
 	}
 
 	response := map[string]interface{}{
 		"object": "list",
 		"data":   data,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *ServerV2) HandleGeminiListModels(w http.ResponseWriter, r *http.Request) {
+	// Get all models from the registry
+	allModels := s.registry.ListModels()
+
+	// Filter to only include Gemini and Antigravity models (exclude OpenAI-compatible providers)
+	models := make([]string, 0, len(allModels))
+	for _, model := range allModels {
+		// Check if this model belongs to a Gemini-compatible provider
+		// by getting the pool and checking the credential type
+		pool := s.registry.GetPool(model)
+		if pool != nil {
+			creds := pool.List()
+			if len(creds) > 0 {
+				// Only include models from Gemini or Antigravity providers
+				if creds[0].ProviderType == auth.ProviderTypeGemini || creds[0].ProviderType == auth.ProviderTypeAntigravity {
+					models = append(models, model)
+				}
+			}
+		}
+	}
+
+	// Model specifications for Gemini and Antigravity providers only
+	modelSpecs := map[string]struct {
+		inputTokenLimit    int
+		outputTokenLimit   int
+		displayName        string
+		description        string
+		thinking           bool
+	}{
+		// Gemini models
+		"gemini-1.5-flash":           {1048576, 8192, "Gemini 1.5 Flash", "Fast and efficient multimodal model", false},
+		"gemini-1.5-pro":             {2097152, 8192, "Gemini 1.5 Pro", "High-performance multimodal model", false},
+		"gemini-1.5-flash-8b":        {1048576, 8192, "Gemini 1.5 Flash 8B", "Lightweight fast model", false},
+		"gemini-2.0-flash":           {1048576, 8192, "Gemini 2.0 Flash", "Next-generation fast model", false},
+		"gemini-2.0-flash-exp":       {1048576, 8192, "Gemini 2.0 Flash Exp", "Experimental next-gen model", false},
+		"gemini-pro":                  {32768, 4096, "Gemini Pro", "Original Gemini model", false},
+		"gemini-pro-vision":          {16384, 4096, "Gemini Pro Vision", "Multimodal vision model", false},
+		
+		// Antigravity models (based on iFlow data - these are Gemini-compatible models served via Antigravity)
+		"gemini-3-pro-low":           {1048576, 8192, "Gemini 3 Pro Low", "Low-latency Gemini 3 model", false},
+		"gemini-2.5-pro":             {1048576, 8192, "Gemini 2.5 Pro", "Enhanced Gemini 2.5 model", false},
+		"gemini-3-pro-high":          {1048576, 8192, "Gemini 3 Pro High", "High-performance Gemini 3", false},
+		"gemini-3-flash":             {1048576, 8192, "Gemini 3 Flash", "Fast Gemini 3 model", false},
+		"gemini-2.5-flash":           {1048576, 8192, "Gemini 2.5 Flash", "Fast Gemini 2.5 model", false},
+		"gemini-2.5-flash-lite":      {1048576, 8192, "Gemini 2.5 Flash Lite", "Lightweight Gemini 2.5", false},
+		"gemini-2.5-flash-thinking": {1048576, 8192, "Gemini 2.5 Flash Thinking", "Reasoning-enhanced model", true},
+		"gemini-3-pro-image":         {1048576, 8192, "Gemini 3 Pro Image", "Image generation model", false},
+	}
+
+	// Create response in Google AI API format
+	geminiModels := make([]map[string]interface{}, 0, len(models))
+	for _, model := range models {
+		// Get model specifications, fallback to defaults if not found
+		spec, exists := modelSpecs[model]
+		if !exists {
+			spec = struct {
+				inputTokenLimit    int
+				outputTokenLimit   int
+				displayName        string
+				description        string
+				thinking           bool
+			}{
+				inputTokenLimit:  1048576, // Default 1M tokens
+				outputTokenLimit: 8192,    // Default 8K tokens
+				displayName:     fmt.Sprintf("Model %s", model),
+				description:     fmt.Sprintf("Generative AI model: %s", model),
+				thinking:        false,
+			}
+		}
+
+		// Extract base model name and version from the model identifier
+		baseModelId := model
+		version := "001"
+		
+		// Try to parse version if model contains version suffix
+		if idx := strings.LastIndex(model, "-"); idx > 0 && idx < len(model)-1 {
+			suffix := model[idx+1:]
+			if _, err := strconv.Atoi(suffix); err == nil {
+				baseModelId = model[:idx]
+				version = suffix
+			}
+		}
+
+		geminiModel := map[string]interface{}{
+			"name":                         fmt.Sprintf("models/%s", model),
+			"baseModelId":                  baseModelId,
+			"version":                      version,
+			"displayName":                  spec.displayName,
+			"description":                  spec.description,
+			"inputTokenLimit":              spec.inputTokenLimit,
+			"outputTokenLimit":             spec.outputTokenLimit,
+			"supportedGenerationMethods":   []string{"generateContent", "streamGenerateContent"},
+			"thinking":                     spec.thinking,
+			"temperature":                  1.0,
+			"maxTemperature":               2.0,
+			"topP":                         0.95,
+			"topK":                         40,
+		}
+		geminiModels = append(geminiModels, geminiModel)
+	}
+
+	response := map[string]interface{}{
+		"models": geminiModels,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

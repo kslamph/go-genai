@@ -100,12 +100,12 @@ func (p *Provider) wrapError(err error) error {
 			"code": apiErr.Code,
 		})
 	}
-	
+
 	// Check if it's a RequestError
 	if reqErr, ok := err.(*openai.RequestError); ok {
 		return provider.NewProviderError(reqErr.HTTPStatusCode, reqErr.Err.Error(), p.name, nil)
 	}
-	
+
 	// Fallback to generic 500 error
 	return provider.NewProviderError(http.StatusInternalServerError, err.Error(), p.name, nil)
 }
@@ -118,7 +118,6 @@ func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 		"kimi-k2-0905",
 		"kimi-k2",
 		"glm-4.6",
-		"glm-4.7",
 		"deepseek-v3.2",
 		"deepseek-r1",
 	}, nil
