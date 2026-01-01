@@ -113,15 +113,3 @@ func (p *CredentialPool) GetNext() *auth.Credential {
 	// For "fast fail", we might return nil if no healthy creds exist.
 	return nil
 }
-
-// GetAllModels returns a list of all models registered in the registry
-func (r *Registry) GetAllModels() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	models := make([]string, 0, len(r.modelPools))
-	for model := range r.modelPools {
-		models = append(models, model)
-	}
-	return models
-}
