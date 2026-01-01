@@ -273,6 +273,9 @@ func buildRequest(ctx context.Context, ac *apiClient, path string, body map[stri
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if ac.clientConfig.Backend == BackendAntigravity {
+		req.Header.Set("User-Agent", AntigravityUserAgent)
+	}
 	if ac.clientConfig.APIKey != "" {
 		req.Header.Set("x-goog-api-key", ac.clientConfig.APIKey)
 	}
@@ -355,12 +358,55 @@ func doRequest(ac *apiClient, req *http.Request) (*http.Response, error) {
 	// Create a new HTTP client and send the request
 	client := ac.clientConfig.HTTPClient
 	resp, err := client.Do(req)
+
+	// Antigravity Failover Logic
+	if ac.clientConfig.Backend == BackendAntigravity {
+		shouldFailover := err != nil
+		if err == nil && resp.StatusCode >= 500 {
+			shouldFailover = true
+		}
+
+		if shouldFailover {
+			// Check if we are currently targeting the Daily endpoint
+			currentURL := req.URL.String()
+			if strings.Contains(currentURL, "daily-cloudcode-pa.sandbox.googleapis.com") {
+				log.Printf("Antigravity: Primary endpoint failed (err: %v, status: %v). Attempting failover to Autopush...", err, resp != nil)
+				if resp != nil {
+					resp.Body.Close() // Close previous response body if it exists
+				}
+
+				// Construct new URL
+				newURLStr := strings.Replace(currentURL, "daily-cloudcode-pa.sandbox.googleapis.com", "autopush-cloudcode-pa.sandbox.googleapis.com", 1)
+				newURL, parseErr := url.Parse(newURLStr)
+				if parseErr == nil {
+					// Clone request for retry
+					retryReq := req.Clone(req.Context())
+					retryReq.URL = newURL
+					retryReq.Host = newURL.Host // Ensure Host header matches
+
+					// Retry
+					retryResp, retryErr := client.Do(retryReq)
+					if retryErr == nil && retryResp.StatusCode < 500 {
+						log.Printf("Antigravity: Failover successful.")
+						return retryResp, nil
+					}
+					// If failover also fails, log it but return the result of the retry (or the original error if retry failed badly)
+					if retryErr != nil {
+						log.Printf("Antigravity: Failover request also failed: %v", retryErr)
+					} else {
+						log.Printf("Antigravity: Failover request returned status: %d", retryResp.StatusCode)
+						return retryResp, nil
+					}
+				}
+			}
+		}
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("doRequest: error sending request: %w", err)
 	}
 	return resp, nil
 }
-
 func deserializeUnaryResponse(resp *http.Response) (map[string]any, error) {
 	if !httpStatusOk(resp) {
 		return nil, newAPIError(resp)

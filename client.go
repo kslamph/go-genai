@@ -297,18 +297,19 @@ func NewClient(ctx context.Context, cc *ClientConfig) (*Client, error) {
 	if baseURL != "" {
 		cc.HTTPOptions.BaseURL = baseURL
 	}
-	if cc.HTTPOptions.BaseURL == "" && (cc.Backend == BackendVertexAI || cc.Backend == BackendAntigravity) {
-		if cc.Location == "global" || cc.APIKey != "" {
-			cc.HTTPOptions.BaseURL = "https://aiplatform.googleapis.com/"
-		} else {
-			cc.HTTPOptions.BaseURL = fmt.Sprintf("https://%s-aiplatform.googleapis.com/", cc.Location)
+		if cc.HTTPOptions.BaseURL == "" && (cc.Backend == BackendVertexAI || cc.Backend == BackendAntigravity) {
+			if cc.Backend == BackendAntigravity {
+				cc.HTTPOptions.BaseURL = AntigravityBaseURLDaily
+			} else if cc.Location == "global" || cc.APIKey != "" {
+				cc.HTTPOptions.BaseURL = "https://aiplatform.googleapis.com/"
+			} else {
+				cc.HTTPOptions.BaseURL = fmt.Sprintf("https://%s-aiplatform.googleapis.com/", cc.Location)
+			}
+		} else if cc.HTTPOptions.BaseURL == "" && cc.Backend == BackendGeminiCLI {
+			cc.HTTPOptions.BaseURL = GeminiCLIBaseURL
+		} else if cc.HTTPOptions.BaseURL == "" {
+			cc.HTTPOptions.BaseURL = "https://generativelanguage.googleapis.com/"
 		}
-	} else if cc.HTTPOptions.BaseURL == "" && cc.Backend == BackendGeminiCLI {
-		cc.HTTPOptions.BaseURL = "https://cloudcode-pa.googleapis.com/"
-	} else if cc.HTTPOptions.BaseURL == "" {
-		cc.HTTPOptions.BaseURL = "https://generativelanguage.googleapis.com/"
-	}
-
 	if cc.HTTPOptions.APIVersion == "" && cc.Backend == BackendVertexAI {
 		cc.HTTPOptions.APIVersion = "v1beta1"
 	} else if cc.HTTPOptions.APIVersion == "" && (cc.Backend == BackendGeminiCLI || cc.Backend == BackendAntigravity) {

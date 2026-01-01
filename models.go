@@ -5352,6 +5352,7 @@ func generateContentParametersToGeminiCLI(ac *apiClient, fromObject map[string]a
 	if err != nil {
 		return nil, err
 	}
+	ensureRoles(mldevParams)
 
 	modelID := ""
 	if urlParams, ok := mldevParams["_url"].(map[string]any); ok {
@@ -5390,6 +5391,7 @@ func generateContentParametersToAntigravity(ac *apiClient, fromObject map[string
 		return nil, err
 	}
 	mldevParams["sessionId"] = generateSessionID()
+	ensureRoles(mldevParams)
 
 	modelID := ""
 	if urlParams, ok := mldevParams["_url"].(map[string]any); ok {
@@ -5439,5 +5441,22 @@ func generateRequestID() string {
 
 func generateSessionID() string {
 	n := rand.Int63n(9000000000000000000)
-	return "session-" + strconv.FormatInt(n, 10)
+	return "-" + strconv.FormatInt(n, 10)
+}
+
+func ensureRoles(params map[string]any) {
+	if si, ok := params["systemInstruction"].(map[string]any); ok {
+		if _, ok := si["role"]; !ok {
+			si["role"] = "user"
+		}
+	}
+	if contents, ok := params["contents"].([]any); ok {
+		for _, c := range contents {
+			if content, ok := c.(map[string]any); ok {
+				if _, ok := content["role"]; !ok {
+					content["role"] = "user"
+				}
+			}
+		}
+	}
 }
