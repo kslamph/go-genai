@@ -209,6 +209,31 @@ func (a *Authenticator) loadCredentials() (*Credentials, error) {
 	return &creds, nil
 }
 
+// marshalCredentials prepares credentials for saving based on auth type
+func (a *Authenticator) marshalCredentials() ([]byte, error) {
+	if a.credentials.AuthType == "oauth" {
+		fileCreds := OAuthFileCredentials{
+			AccessToken:  a.credentials.AccessToken,
+			RefreshToken: a.credentials.RefreshToken,
+			TokenType:    a.credentials.TokenType,
+			Scope:        a.credentials.Scope,
+			APIKey:       a.credentials.APIKey,
+		}
+
+		if a.credentials.ExpiryDate > 0 {
+			fileCreds.ExpiryDate = a.credentials.ExpiryDate
+		} else if a.credentials.ExpiresAt != "" {
+			if t, parseErr := time.Parse(time.RFC3339, a.credentials.ExpiresAt); parseErr == nil {
+				fileCreds.ExpiryDate = t.UnixMilli()
+			}
+		}
+
+		return json.MarshalIndent(fileCreds, "", "  ")
+	}
+	
+	return json.MarshalIndent(a.credentials, "", "  ")
+}
+
 // saveCredentials saves credentials to file
 func (a *Authenticator) saveCredentials() error {
 	if a.credentials == nil {
@@ -233,37 +258,9 @@ func (a *Authenticator) saveCredentials() error {
 	}
 	defer fileLock.Unlock()
 
-	var data []byte
-
-	// Use strict format for OAuth
-	if a.credentials.AuthType == "oauth" {
-		fileCreds := OAuthFileCredentials{
-			AccessToken:  a.credentials.AccessToken,
-			RefreshToken: a.credentials.RefreshToken,
-			TokenType:    a.credentials.TokenType,
-			Scope:        a.credentials.Scope,
-			APIKey:       a.credentials.APIKey,
-		}
-
-		if a.credentials.ExpiryDate > 0 {
-			fileCreds.ExpiryDate = a.credentials.ExpiryDate
-		} else if a.credentials.ExpiresAt != "" {
-			if t, parseErr := time.Parse(time.RFC3339, a.credentials.ExpiresAt); parseErr == nil {
-				fileCreds.ExpiryDate = t.UnixMilli()
-			}
-		}
-
-		var marshalErr error
-		data, marshalErr = json.MarshalIndent(fileCreds, "", "  ")
-		if marshalErr != nil {
-			return fmt.Errorf("failed to marshal credentials: %w", marshalErr)
-		}
-	} else {
-		var marshalErr error
-		data, marshalErr = json.MarshalIndent(a.credentials, "", "  ")
-		if marshalErr != nil {
-			return fmt.Errorf("failed to marshal credentials: %w", marshalErr)
-		}
+	data, err := a.marshalCredentials()
+	if err != nil {
+		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
 
 	if err := os.WriteFile(credsPath, data, 0600); err != nil {
@@ -335,7 +332,7 @@ func (a *Authenticator) refreshAccessToken(credentials Credentials) (Credentials
 	return updatedCredentials, nil
 }
 
-// GetToken returns a valid API key for LLM calls, refreshing if necessary
+// GetToken returns a valid API key for LLM calls, refreshing if necessary.
 func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -349,52 +346,37 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 		a.credentials = creds
 	}
 
-	// Check if we have credentials
-	if a.credentials == nil || a.credentials.AccessToken == "" {
-		return "", fmt.Errorf("no valid credentials available")
-	}
-
-	// Check if token is valid
-	if IsTokenValid(*a.credentials) {
-		// If we still don't have an API key, try to fetch it
-		if a.credentials.APIKey == "" {
-			if err := a.fetchUserInfo(); err != nil {
-				utils.L().Errorw("Failed to fetch API key",
-					"provider", "iFlow",
-					"error", err)
-			} else {
-				_ = a.saveCredentials()
-			}
-		}
-
-		// Return the API key for LLM calls, as requested by the user
-		if a.credentials.APIKey != "" {
-			return a.credentials.APIKey, nil
-		}
-		// Fallback to AccessToken if APIKey is still not available
-		return a.credentials.AccessToken, nil
-	}
-
-	// Token is invalid, try to refresh
-	updatedCreds, err := a.refreshAccessToken(*a.credentials)
-	if err != nil {
-		utils.L().Errorw("Token refresh failed",
-			"provider", "iFlow",
-			"error", err)
-		return "", fmt.Errorf("failed to refresh token: %w", err)
-	}
-
-	utils.L().Infow("Token refreshed successfully",
-		"provider", "iFlow")
-
-	a.credentials = &updatedCreds
-
-	// Return the API key for LLM calls, as requested by the user
+	// If we already have an API key, return it
 	if a.credentials.APIKey != "" {
 		return a.credentials.APIKey, nil
 	}
-	// Fallback to AccessToken if APIKey is still not available
-	return a.credentials.AccessToken, nil
+
+	// No API key, so we need to fetch it. First, ensure we have a valid access token.
+	if !IsTokenValid(*a.credentials) {
+		updatedCreds, err := a.refreshAccessToken(*a.credentials)
+		if err != nil {
+			return "", fmt.Errorf("failed to refresh access token to fetch API key: %w", err)
+		}
+		a.credentials = &updatedCreds
+	}
+
+	// Now that we have a valid access token, fetch the user info to get the API key.
+	if err := a.fetchUserInfo(); err != nil {
+		return "", fmt.Errorf("failed to fetch user info to get API key: %w", err)
+	}
+
+	// Save the newly fetched API key
+	if err := a.saveCredentials(); err != nil {
+		utils.L().Errorw("Failed to save credentials with new API key", "error", err)
+		// Continue anyway, we have the API key in memory.
+	}
+
+	// Finally, return the API key
+	if a.credentials.APIKey == "" {
+		return "", fmt.Errorf("API key could not be retrieved after authentication")
+	}
+
+	return a.credentials.APIKey, nil
 }
 
 // fetchUserInfo fetches user information and API key
