@@ -43,7 +43,6 @@ type CredentialState int
 
 const (
 	CredentialStateActive CredentialState = iota
-	CredentialStatePenaltyBox
 	CredentialStateDead
 )
 
@@ -52,8 +51,6 @@ func (s CredentialState) String() string {
 	switch s {
 	case CredentialStateActive:
 		return "Active"
-	case CredentialStatePenaltyBox:
-		return "PenaltyBox"
 	case CredentialStateDead:
 		return "Dead"
 	default:
@@ -73,9 +70,10 @@ type Credential struct {
 	ProjectID    string    `json:"project_id,omitempty"`
 
 	// State data
-	State        CredentialState `json:"state"`
-	PenaltyUntil time.Time       `json:"penalty_until,omitempty"`
-	FailureCount int             `json:"failure_count"`
+	State              CredentialState `json:"state"`
+	FailureCount       int             `json:"failure_count"`
+	RateLimitResetTime time.Time       `json:"rate_limit_reset_time,omitempty"` // When rate limit will reset (from 429 error)
+	LastUsedAt         time.Time       `json:"last_used_at,omitempty"`           // Last time this credential was used (for round-robin)
 
 	// Client pool for this credential
 	clientPool *ClientPool `json:"-"`

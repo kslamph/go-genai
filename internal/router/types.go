@@ -38,3 +38,19 @@ type Router interface {
 	// This method parses the HTTP request, creates a Request struct, and writes the response
 	HandleGeminiRequest(w http.ResponseWriter, r *http.Request)
 }
+
+// CredentialErrorRecorder defines the interface for recording errors on credentials
+// This allows the router to update credential state without creating an import cycle
+type CredentialErrorRecorder interface {
+	// RecordError records an error for a credential and updates its state based on error type
+	// For 429 errors, it sets RateLimitResetTime or increases FailureCount for exponential backoff
+	RecordError(credentialID string, model string, err error)
+}
+
+// CredentialSelector defines the interface for selecting credentials
+// This allows the router to get credentials without creating an import cycle
+type CredentialSelector interface {
+	// GetCredential returns a credential for the specified model
+	// Returns nil if no credential is available
+	GetCredential(model string) interface{}
+}

@@ -69,10 +69,6 @@ func (m *Manager) Validate(cred *Credential) error {
 		return fmt.Errorf("credential is dead")
 	}
 
-	if cred.State == CredentialStatePenaltyBox && time.Now().Before(cred.PenaltyUntil) {
-		return fmt.Errorf("credential is in penalty box until %v", cred.PenaltyUntil)
-	}
-
 	return nil
 }
 

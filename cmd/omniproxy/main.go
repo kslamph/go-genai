@@ -54,7 +54,7 @@ func main() {
 	}
 
 	// D. Smart Router (V2)
-	sr := router.NewSmartRouterV2(authMgr, registry)
+	sr := router.NewSmartRouterV2(authMgr, registry, registry)
 
 	// E. Server (V2)
 	server := api.NewServerV2(sr, registry)

@@ -7,10 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	
+
 	"github.com/sashabaranov/go-openai"
 	"github.com/sunbankio/omniproxy/internal/auth"
-	"github.com/sunbankio/omniproxy/internal/manager"
 	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 	"google.golang.org/genai"
@@ -18,15 +17,17 @@ import (
 
 // SmartRouterV2 handles routing with "Fast Fail" logic
 type SmartRouterV2 struct {
-	authManager auth.AuthManager
-	registry    *manager.Registry
+	authManager   auth.AuthManager
+	selector      CredentialSelector
+	errorRecorder CredentialErrorRecorder
 }
 
 // NewSmartRouterV2 creates a new SmartRouterV2
-func NewSmartRouterV2(authManager auth.AuthManager, registry *manager.Registry) *SmartRouterV2 {
+func NewSmartRouterV2(authManager auth.AuthManager, selector CredentialSelector, errorRecorder CredentialErrorRecorder) *SmartRouterV2 {
 	return &SmartRouterV2{
-		authManager: authManager,
-		registry:    registry,
+		authManager:   authManager,
+		selector:      selector,
+		errorRecorder: errorRecorder,
 	}
 }
 
@@ -67,7 +68,7 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 
 	// 4. Execute Request
 	resp, err := r.executeWithCredential(ctx, cred, req)
-	
+
 	if err != nil {
 		// 5. Error Handling (Reactive)
 		if providerErr, ok := err.(*provider.ProviderError); ok {
@@ -77,7 +78,20 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 				_ = r.authManager.ForceRefresh(ctx, cred)
 				_ = r.authManager.RefreshClient(ctx, cred)
 			}
+
+			// If 429, update credential state for rate limiting
+			if providerErr.StatusCode == http.StatusTooManyRequests {
+				utils.L().Warnw("429 Rate limit error for credential",
+					"credential_id", cred.ID,
+					"provider", string(cred.Type()),
+					"error", err)
+				// Use errorRecorder interface to record the error
+				if r.errorRecorder != nil {
+					r.errorRecorder.RecordError(cred.ID, req.Model, err)
+				}
+			}
 		}
+		// Pass all errors to user (no silent failover retry)
 		return nil, err
 	}
 
@@ -85,14 +99,14 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 }
 
 func (r *SmartRouterV2) selectCredential(req *Request) (*auth.Credential, error) {
-	pool := r.registry.GetPool(req.Model)
-	if pool == nil {
-		return nil, fmt.Errorf("model not found: %s", req.Model)
+	credInterface := r.selector.GetCredential(req.Model)
+	if credInterface == nil {
+		return nil, fmt.Errorf("no active credentials for model %s", req.Model)
 	}
 
-	cred := pool.GetNext()
-	if cred == nil {
-		return nil, fmt.Errorf("no active credentials for model %s", req.Model)
+	cred, ok := credInterface.(*auth.Credential)
+	if !ok {
+		return nil, fmt.Errorf("invalid credential type for model %s", req.Model)
 	}
 
 	return cred, nil
@@ -251,6 +265,10 @@ func (r *SmartRouterV2) executeGeminiStream(ctx context.Context, cred *auth.Cred
 			if !firstItemChecked {
 				firstItemChecked = true
 				if err != nil {
+					// Check if this is a 429 error and update credential state
+					if IsRateLimitError(err) && r.errorRecorder != nil {
+						r.errorRecorder.RecordError(cred.ID, req.Model, err)
+					}
 					firstResult <- err
 					return
 				}
@@ -274,6 +292,10 @@ func (r *SmartRouterV2) executeGeminiStream(ctx context.Context, cred *auth.Cred
 						"chunks_sent", chunkCount,
 						"provider", string(cred.Type()),
 						"provider_name", cred.Name())
+					// Check if this is a 429 error and update credential state
+					if IsRateLimitError(err) && r.errorRecorder != nil {
+						r.errorRecorder.RecordError(cred.ID, req.Model, err)
+					}
 				} else {
 					utils.L().Infow("Gemini stream completed normally (EOF)",
 						"model", modelName,
@@ -431,6 +453,10 @@ func (r *SmartRouterV2) executeOpenAIStream(ctx context.Context, cred *auth.Cred
 
 	respChan, errChan, err := openaiProvider.StreamChatCompletion(ctx, req)
 	if err != nil {
+		// Check if this is a 429 error and update credential state
+		if IsRateLimitError(err) && r.errorRecorder != nil {
+			r.errorRecorder.RecordError(cred.ID, req.Model, err)
+		}
 		return nil, err
 	}
 
@@ -470,6 +496,10 @@ func (r *SmartRouterV2) executeOpenAIStream(ctx context.Context, cred *auth.Cred
 					}
 					// Stream error occurred
 					utils.L().Errorw("Stream error (V2)", "model", req.Model, "error", err, "provider", string(cred.Type()), "provider_name", cred.Name())
+					// Check if this is a 429 error and update credential state
+					if IsRateLimitError(err) && r.errorRecorder != nil {
+						r.errorRecorder.RecordError(cred.ID, req.Model, err)
+					}
 					return
 				}
 				// Success with nil error - wait for respChan to close

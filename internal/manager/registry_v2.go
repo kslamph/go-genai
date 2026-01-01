@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sunbankio/omniproxy/internal/auth"
+	"github.com/sunbankio/omniproxy/internal/router"
 )
 
 // Registry stores the mapping between Virtual Models and Credentials
@@ -53,6 +54,16 @@ func (r *Registry) GetPool(model string) *CredentialPool {
 	return r.modelPools[model]
 }
 
+// GetCredential returns a credential for the specified model
+// This implements the CredentialSelector interface
+func (r *Registry) GetCredential(model string) interface{} {
+	pool := r.GetPool(model)
+	if pool == nil {
+		return nil
+	}
+	return pool.GetNext()
+}
+
 // ListModels returns a list of all registered model names
 func (r *Registry) ListModels() []string {
 	r.mu.RLock()
@@ -63,6 +74,56 @@ func (r *Registry) ListModels() []string {
 		models = append(models, model)
 	}
 	return models
+}
+
+// RecordError records an error for a credential and updates its state based on error type
+// This implements the CredentialErrorRecorder interface
+func (r *Registry) RecordError(credentialID string, model string, err error) {
+	pool := r.GetPool(model)
+	if pool == nil {
+		return
+	}
+
+	// Find the credential by ID and record the error
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	for _, cred := range pool.credentials {
+		if cred.ID == credentialID {
+			// Check if it's a 429 rate limit error
+			if router.IsRateLimitError(err) {
+				resetTime := router.ExtractQuotaResetTime(err)
+
+				if !resetTime.IsZero() {
+					// Type 1 or Type 2: Explicit reset time provided
+					// Set RateLimitResetTime - credential won't be selected until this time
+					cred.RateLimitResetTime = resetTime
+					cred.FailureCount = 0 // Reset failure count since we have explicit reset time
+				} else {
+					// Type 3: No explicit reset time - use exponential backoff
+					cred.FailureCount++
+					backoffDuration := router.GetExponentialBackoffDuration(cred.FailureCount)
+					cred.RateLimitResetTime = time.Now().Add(backoffDuration)
+				}
+
+				// Log the rate limit error handling
+				// utils.L().Warnw("Rate limit error recorded",
+				// 	"credential_id", cred.ID,
+				// 	"failure_count", cred.FailureCount,
+				// 	"rate_limit_reset_time", cred.RateLimitResetTime,
+				// 	"error", err)
+				return
+			}
+
+			// For other errors, just increase failure count
+			cred.FailureCount++
+			if cred.FailureCount > 10 {
+				// Mark as dead if too many failures
+				cred.State = auth.CredentialStateDead
+			}
+			return
+		}
+	}
 }
 
 // Add adds a credential to the pool
@@ -82,34 +143,56 @@ func (p *CredentialPool) List() []*auth.Credential {
 	return result
 }
 
-// GetNext returns a credential based on a simple round-robin or first-available logic.
-// This is a simplified selector that can be expanded later.
+// GetNext returns a credential based on round-robin selection.
+// Implements the following logic:
+// 1. Round-robin selection based on LastUsedAt timestamp
+// 2. Skip credentials that are in rate limit penalty (RateLimitResetTime > now)
+// 3. Skip credentials that are dead
+// 4. Update LastUsedAt when a credential is selected
 func (p *CredentialPool) GetNext() *auth.Credential {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	if len(p.credentials) == 0 {
 		return nil
 	}
 
-	// Simple selection: find the first Active credential not in penalty box
-	// (Round-robin state would be tracked here if we wanted strict RR)
+	now := time.Now()
+	var selectedCred *auth.Credential
+	var oldestLastUsed time.Time
+
+	// Find the oldest used credential that is not in penalty
 	for _, cred := range p.credentials {
-		if cred.State == auth.CredentialStateActive {
-			return cred
+		// Check if credential is in rate limit penalty
+		if !cred.RateLimitResetTime.IsZero() && now.Before(cred.RateLimitResetTime) {
+			// Skip this credential - it's in rate limit penalty
+			continue
 		}
-		if cred.State == auth.CredentialStatePenaltyBox && time.Now().After(cred.PenaltyUntil) {
-			// Auto-release from penalty box
-			// Note: We need a write lock to change state, but we are in RLock.
-			// Ideally this state management happens in the AuthManager or a background loop.
-			// For now, we just skip it to be safe, or we could upgrade lock.
-			// Let's just return it if the time has passed, letting the caller handle the state reset if needed.
-			return cred
+
+		// Check if credential is dead
+		if cred.State == auth.CredentialStateDead {
+			continue
+		}
+
+		// Track the oldest used credential for round-robin
+		if selectedCred == nil || cred.LastUsedAt.Before(oldestLastUsed) {
+			selectedCred = cred
+			oldestLastUsed = cred.LastUsedAt
 		}
 	}
 
-	// If all are penalized, return the one with earliest expiry?
-	// Or just return nil/error?
-	// For "fast fail", we might return nil if no healthy creds exist.
-	return nil
+	// If no healthy credential found, return nil
+	if selectedCred == nil {
+		return nil
+	}
+
+	// Update LastUsedAt for round-robin
+	selectedCred.LastUsedAt = now
+
+	// Clear RateLimitResetTime if it has passed to keep credential object clean
+	if !selectedCred.RateLimitResetTime.IsZero() && now.After(selectedCred.RateLimitResetTime) {
+		selectedCred.RateLimitResetTime = time.Time{}
+	}
+
+	return selectedCred
 }
