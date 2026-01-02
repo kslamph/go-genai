@@ -2,7 +2,7 @@ module github.com/sunbankio/omniproxy
 
 go 1.25.0
 
-replace google.golang.org/genai => ../go-genai
+replace google.golang.org/genai => github.com/kslamph/go-genai v0.0.0-20260102090203-e5276502d3ca
 
 require (
 	cloud.google.com/go/auth v0.18.0
@@ -11,7 +11,7 @@ require (
 	github.com/sashabaranov/go-openai v1.41.2
 	go.uber.org/zap v1.27.0
 	golang.org/x/oauth2 v0.30.0
-	google.golang.org/genai v1.40.0
+	google.golang.org/genai v0.0.0-20260102085516-e5276502d3ca
 	gopkg.in/yaml.v3 v3.0.1
 )
 

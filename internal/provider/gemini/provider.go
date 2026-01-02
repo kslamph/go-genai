@@ -42,6 +42,9 @@ func NewProvider(ctx context.Context, name string, auth *Authenticator) (*Gemini
 	if err != nil {
 		return nil, fmt.Errorf("failed to create genai client: %w", err)
 	}
+	utils.L().Infow("Successfully created Gemini provider",
+		"provider", name,
+		"project_id", projectID)
 
 	return &GeminiProvider{
 		client: client,
