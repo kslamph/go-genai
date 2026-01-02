@@ -502,23 +502,18 @@ func (s *ServerV2) HandleGeminiListModels(w http.ResponseWriter, r *http.Request
 		namespace        string
 	}{
 		// Gemini models
-		"gemini-1.5-flash":     {1048576, 8192, "Gemini 1.5 Flash", "Fast and efficient multimodal model", false, "Gemini-1.5"},
-		"gemini-1.5-pro":       {2097152, 8192, "Gemini 1.5 Pro", "High-performance multimodal model", false, "Gemini-1.5"},
-		"gemini-1.5-flash-8b":  {1048576, 8192, "Gemini 1.5 Flash 8B", "Lightweight fast model", false, "Gemini-1.5"},
-		"gemini-2.0-flash":     {1048576, 8192, "Gemini 2.0 Flash", "Next-generation fast model", false, "Gemini-2.0"},
-		"gemini-2.0-flash-exp": {1048576, 8192, "Gemini 2.0 Flash Exp", "Experimental next-gen model", false, "Gemini-2.0"},
-		"gemini-pro":           {32768, 4096, "Gemini Pro", "Original Gemini model", false, "models"},
-		"gemini-pro-vision":    {16384, 4096, "Gemini Pro Vision", "Multimodal vision model", false, "models"},
+		"gemini-3-pro-preview":   {1048576, 65535, "Gemini Pro", "Original Gemini model", false, "models"},
+		"gemini-3-flash-preview": {1048576, 65535, "Gemini Pro Vision", "Multimodal vision model", false, "models"},
 
 		// Antigravity models (based on iFlow data - these are Gemini-compatible models served via Antigravity)
-		"gemini-3-pro-low":          {1048576, 8192, "Gemini 3 Pro Low", "Low-latency Gemini 3 model", false, "Gemini-3"},
-		"gemini-2.5-pro":            {1048576, 8192, "Gemini 2.5 Pro", "Enhanced Gemini 2.5 model", false, "Gemini-2.5"},
-		"gemini-3-pro-high":         {1048576, 8192, "Gemini 3 Pro High", "High-performance Gemini 3", false, "Gemini-3"},
-		"gemini-3-flash":            {1048576, 8192, "Gemini 3 Flash", "Fast Gemini 3 model", false, "Gemini-3"},
-		"gemini-2.5-flash":          {1048576, 8192, "Gemini 2.5 Flash", "Fast Gemini 2.5 model", false, "Gemini-2.5"},
-		"gemini-2.5-flash-lite":     {1048576, 8192, "Gemini 2.5 Flash Lite", "Lightweight Gemini 2.5", false, "Gemini-2.5"},
-		"gemini-2.5-flash-thinking": {1048576, 8192, "Gemini 2.5 Flash Thinking", "Reasoning-enhanced model", true, "Gemini-2.5"},
-		"gemini-3-pro-image":        {1048576, 8192, "Gemini 3 Pro Image", "Image generation model", false, "Gemini-3"},
+		"gemini-3-pro-low":          {1048576, 65535, "Gemini 3 Pro Low", "Low-latency Gemini 3 model", false, "Gemini-3"},
+		"gemini-2.5-pro":            {1048576, 65535, "Gemini 2.5 Pro", "Enhanced Gemini 2.5 model", false, "Gemini-2.5"},
+		"gemini-3-pro-high":         {1048576, 65535, "Gemini 3 Pro High", "High-performance Gemini 3", false, "Gemini-3"},
+		"gemini-3-flash":            {1048576, 65535, "Gemini 3 Flash", "Fast Gemini 3 model", false, "Gemini-3"},
+		"gemini-2.5-flash":          {1048576, 65535, "Gemini 2.5 Flash", "Fast Gemini 2.5 model", false, "Gemini-2.5"},
+		"gemini-2.5-flash-lite":     {1048576, 65535, "Gemini 2.5 Flash Lite", "Lightweight Gemini 2.5", false, "Gemini-2.5"},
+		"gemini-2.5-flash-thinking": {1048576, 65535, "Gemini 2.5 Flash Thinking", "Reasoning-enhanced model", true, "Gemini-2.5"},
+		"gemini-3-pro-image":        {1048576, 65535, "Gemini 3 Pro Image", "Image generation model", false, "Gemini-3"},
 
 		// OpenAI models (via Antigravity)
 		"gpt-oss-120b-medium": {131072, 32768, "GPT OSS 120B Medium", "Open-source 120B model", false, "OpenAI"},

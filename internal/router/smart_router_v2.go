@@ -161,6 +161,16 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 					"credential_id", cred.ID,
 					"provider", string(cred.Type()),
 					"error", err)
+
+				// Extract retry time if available and setting it in the error
+				if resetTime := ExtractQuotaResetTime(err); !resetTime.IsZero() {
+					retryAfter := time.Until(resetTime)
+					if retryAfter > 0 {
+						// Format as seconds (integer)
+						providerErr.RetryAfter = fmt.Sprintf("%.0f", retryAfter.Seconds())
+					}
+				}
+
 				// Use errorRecorder interface to record the error
 				if r.errorRecorder != nil {
 					r.errorRecorder.RecordError(cred.ID, req.Model, err)
@@ -613,6 +623,9 @@ func (r *SmartRouterV2) executeOpenAIStream(ctx context.Context, cred *auth.Cred
 			case resp, ok := <-respChan:
 				if !ok {
 					// Stream ended - provider has finished sending all data
+					// // Send [DONE] signal to indicate stream termination (standard OpenAI protocol)
+					// // Note: This is a legacy feature - some clients may not require this, so it's commented out for now
+					// pw.Write([]byte("data: [DONE]\n\n"))
 					return
 				}
 
@@ -719,6 +732,22 @@ func (r *SmartRouterV2) mapGeminiError(err error, cred *auth.Credential) *provid
 	// Append status string to message for clarity
 	if statusStr != "" {
 		message = fmt.Sprintf("%s, Status: %s", message, statusStr)
+	}
+
+	// Try to extract retry time
+	if resetTime := ExtractQuotaResetTime(err); !resetTime.IsZero() {
+		// Format as seconds (integer)
+		retryAfter := time.Until(resetTime)
+		if retryAfter > 0 {
+			// Create new error with retry info
+			return provider.NewProviderErrorWithRetry(
+				statusCode,
+				message,
+				string(cred.Type()),
+				details,
+				fmt.Sprintf("%.0f", retryAfter.Seconds()),
+			)
+		}
 	}
 
 	return &provider.ProviderError{

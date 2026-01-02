@@ -109,14 +109,14 @@ func testAntigravity(ctx context.Context) {
 		log.Fatalf("Failed to create genai client for Antigravity: %v", err)
 	}
 
-	model := "gpt-oss-120b-medium"
+	model := "rev19-uic3-1p"
 	runTests(ctx, client, model)
 }
 
 func runTests(ctx context.Context, client *genai.Client, model string) {
 	fmt.Printf("Calling GenerateContent with model %s...\n", model)
 
-	result, err := client.Models.GenerateContent(ctx, model, genai.Text("describe what model are you"), nil)
+	result, err := client.Models.GenerateContent(ctx, model, genai.Text("describe what model are you, who developed trained you, based on what model, and your version, your capability"), nil)
 	if err != nil {
 		log.Printf("GenerateContent failed: %v", err)
 		return
@@ -129,7 +129,7 @@ func runTests(ctx context.Context, client *genai.Client, model string) {
 	}
 
 	fmt.Println("\nCalling GenerateContentStream...")
-	iter := client.Models.GenerateContentStream(ctx, model, genai.Text("Write a short poem about the moon."), nil)
+	iter := client.Models.GenerateContentStream(ctx, model, genai.Text("describe what model are you, who developed trained you, based on what model, and your version, your capability"), nil)
 	fmt.Print("Streamed Response: ")
 	for resp, err := range iter {
 		if err != nil {
