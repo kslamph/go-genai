@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"cloud.google.com/go/auth"
 )
@@ -30,6 +31,9 @@ import (
 //
 // This helper function mimics the behavior of the official Cloud Code extension
 // and other internal tools by calling the `loadCodeAssist` endpoint.
+//
+// If no project is found, it will attempt to onboard the user by calling the
+// `onboardUser` endpoint and polling until completion.
 //
 // Supported backends: BackendAntigravity, BackendGeminiCLI.
 func DiscoverCloudCodeProject(ctx context.Context, creds *auth.Credentials, backend Backend) (string, error) {
@@ -42,9 +46,6 @@ func DiscoverCloudCodeProject(ctx context.Context, creds *auth.Credentials, back
 		return "", fmt.Errorf("unsupported backend for project discovery: %v", backend)
 	}
 
-	apiPath := "v1internal:loadCodeAssist"
-	url := baseURL + apiPath
-
 	// 1. Prepare Metadata & Request
 	clientMetadata := map[string]interface{}{
 		"ideType":    "IDE_UNSPECIFIED",
@@ -56,53 +57,124 @@ func DiscoverCloudCodeProject(ctx context.Context, creds *auth.Credentials, back
 		"metadata":                clientMetadata,
 	}
 
-	reqBody, err := json.Marshal(loadRequest)
+	// 2. Call loadCodeAssist to check if project exists
+	loadResponse, err := callCodeAssistAPI(ctx, creds, baseURL, "loadCodeAssist", loadRequest, backend)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal loadCodeAssist request: %w", err)
+		return "", fmt.Errorf("loadCodeAssist failed: %w", err)
 	}
 
-	// 2. Create Request
+	// 3. Check if project already exists
+	if projectID, ok := loadResponse["cloudaicompanionProject"].(string); ok && projectID != "" {
+		return projectID, nil
+	}
+
+	// 4. If no project exists, onboard the user
+	// Get the default tier from the response
+	defaultTier := "free-tier"
+	if allowedTiers, ok := loadResponse["allowedTiers"].([]interface{}); ok {
+		for _, tier := range allowedTiers {
+			if tierMap, ok := tier.(map[string]interface{}); ok {
+				if isDefault, ok := tierMap["isDefault"].(bool); ok && isDefault {
+					if tierID, ok := tierMap["id"].(string); ok {
+						defaultTier = tierID
+						break
+					}
+				}
+			}
+		}
+	}
+
+	onboardRequest := map[string]interface{}{
+		"tierId":                  defaultTier,
+		"cloudaicompanionProject": "",
+		"metadata":                clientMetadata,
+	}
+
+	// 5. Poll onboardUser until completion
+	return onboardUser(ctx, creds, baseURL, onboardRequest, backend)
+}
+
+// onboardUser calls the onboardUser endpoint and polls for completion
+func onboardUser(ctx context.Context, creds *auth.Credentials, baseURL string, request map[string]interface{}, backend Backend) (string, error) {
+	const maxRetries = 30
+	const pollInterval = 2 * time.Second
+
+	for retryCount := 0; retryCount < maxRetries; retryCount++ {
+		response, err := callCodeAssistAPI(ctx, creds, baseURL, "onboardUser", request, backend)
+		if err != nil {
+			return "", fmt.Errorf("onboardUser failed: %w", err)
+		}
+
+		// Check if operation is done
+		if done, ok := response["done"].(bool); ok && done {
+			// Extract project ID from response
+			if respData, ok := response["response"].(map[string]interface{}); ok {
+				if projectData, ok := respData["cloudaicompanionProject"].(map[string]interface{}); ok {
+					if projectID, ok := projectData["id"].(string); ok && projectID != "" {
+						return projectID, nil
+					}
+				}
+			}
+			// If no project ID in response, return empty string (fallback)
+			return "", nil
+		}
+
+		// Wait before next poll
+		if retryCount < maxRetries-1 {
+			select {
+			case <-time.After(pollInterval):
+				continue
+			case <-ctx.Done():
+				return "", fmt.Errorf("onboardUser poll cancelled: %w", ctx.Err())
+			}
+		}
+	}
+
+	return "", fmt.Errorf("onboardUser timeout: operation did not complete within %d retries", maxRetries)
+}
+
+// callCodeAssistAPI is a helper function to make API calls to the Code Assist endpoints
+func callCodeAssistAPI(ctx context.Context, creds *auth.Credentials, baseURL, method string, body map[string]interface{}, backend Backend) (map[string]interface{}, error) {
+	apiPath := "v1internal:" + method
+	url := baseURL + apiPath
+
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal %s request: %w", method, err)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
 	if err != nil {
-		return "", fmt.Errorf("failed to create discovery request: %w", err)
+		return nil, fmt.Errorf("failed to create %s request: %w", method, err)
 	}
 
-	// 3. Add Headers
 	req.Header.Set("Content-Type", "application/json")
 	if backend == BackendAntigravity {
 		req.Header.Set("User-Agent", AntigravityUserAgent)
 	}
 
-	// Get Token from Creds
 	token, err := creds.Token(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to get auth token for discovery: %w", err)
+		return nil, fmt.Errorf("failed to get auth token for %s: %w", method, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token.Value)
 
-	// 4. Execute Request
-	client := &http.Client{} // Use default client for this helper
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("discovery request failed: %w", err)
+		return nil, fmt.Errorf("%s request failed: %w", method, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("loadCodeAssist API returned status %d: %s", resp.StatusCode, string(body))
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("%s API returned status %d: %s", method, resp.StatusCode, string(bodyBytes))
 	}
 
-	// 5. Parse Response
-	var loadResponse map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&loadResponse); err != nil {
-		return "", fmt.Errorf("failed to decode discovery response: %w", err)
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode %s response: %w", method, err)
 	}
 
-	// 6. Extract Project ID
-	if projectID, ok := loadResponse["cloudaicompanionProject"].(string); ok && projectID != "" {
-		return projectID, nil
-	}
-
-	return "", fmt.Errorf("project ID not found in response")
+	return response, nil
 }

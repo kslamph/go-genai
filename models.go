@@ -3055,12 +3055,28 @@ func partToMldev(fromObject map[string]any, parentObject map[string]any) (toObje
 
 	fromInlineData := getValueByPath(fromObject, []string{"inlineData"})
 	if fromInlineData != nil {
-		fromInlineData, err = blobToMldev(fromInlineData.(map[string]any), toObject)
+		convertedInlineData, err := blobToMldev(fromInlineData.(map[string]any), toObject)
 		if err != nil {
 			return nil, err
 		}
 
-		setValueByPath(toObject, []string{"inlineData"}, fromInlineData)
+		// Only include inlineData if it has a non-empty data field
+		// Antigravity backend rejects parts with empty data (oneof field requirement)
+		if dataValue, ok := convertedInlineData["data"]; ok && dataValue != nil {
+			// Check if data is non-empty (handles both string and []byte types)
+			if dataBytes, ok := dataValue.([]byte); ok {
+				if len(dataBytes) > 0 {
+					setValueByPath(toObject, []string{"inlineData"}, convertedInlineData)
+				}
+			} else if dataStr, ok := dataValue.(string); ok {
+				if dataStr != "" {
+					setValueByPath(toObject, []string{"inlineData"}, convertedInlineData)
+				}
+			} else {
+				// For any other non-nil type, include it
+				setValueByPath(toObject, []string{"inlineData"}, convertedInlineData)
+			}
+		}
 	}
 
 	fromText := getValueByPath(fromObject, []string{"text"})
@@ -5400,6 +5416,63 @@ func generateContentParametersToAntigravity(ac *apiClient, fromObject map[string
 	}
 	delete(mldevParams, "_url")
 
+	// Antigravity-specific transformations based on reference implementation
+
+	// 1. Remove safetySettings - Antigravity doesn't support this
+	delete(mldevParams, "safetySettings")
+
+	// 2. Set toolConfig.functionCallingConfig.mode to VALIDATED
+	if toolConfig, ok := mldevParams["toolConfig"].(map[string]any); ok {
+		if functionCallingConfig, ok := toolConfig["functionCallingConfig"].(map[string]any); ok {
+			functionCallingConfig["mode"] = "VALIDATED"
+		} else {
+			// Create functionCallingConfig if it doesn't exist
+			toolConfig["functionCallingConfig"] = map[string]any{
+				"mode": "VALIDATED",
+			}
+		}
+	}
+
+	// 3. Remove maxOutputTokens from generationConfig
+	if generationConfig, ok := mldevParams["generationConfig"].(map[string]any); ok {
+		delete(generationConfig, "maxOutputTokens")
+
+		// 4. Handle thinkingConfig for non-gemini-3 models
+		// For non-gemini-3 models: delete thinkingLevel, set thinkingBudget to -1
+		if thinkingConfig, ok := generationConfig["thinkingConfig"].(map[string]any); ok {
+			if !strings.HasPrefix(modelID, "gemini-3-") {
+				// Remove thinkingLevel for non-gemini-3 models
+				delete(thinkingConfig, "thinkingLevel")
+				// Set thinkingBudget to -1
+				thinkingConfig["thinkingBudget"] = -1
+			}
+		}
+	}
+
+	// 5. Handle Claude models - convert parametersJsonSchema to parameters
+	// For Claude models (sonnet and opus): parametersJsonSchema needs to be moved to parameters
+	if strings.HasPrefix(modelID, "claude-sonnet-") || strings.HasPrefix(modelID, "claude-opus-") {
+		if tools, ok := mldevParams["tools"].([]any); ok {
+			for _, tool := range tools {
+				if toolMap, ok := tool.(map[string]any); ok {
+					if functionDeclarations, ok := toolMap["functionDeclarations"].([]any); ok {
+						for _, funcDecl := range functionDeclarations {
+							if funcDeclMap, ok := funcDecl.(map[string]any); ok {
+								if parametersJsonSchema, ok := funcDeclMap["parametersJsonSchema"].(map[string]any); ok {
+									// Move parametersJsonSchema to parameters
+									funcDeclMap["parameters"] = parametersJsonSchema
+									// Remove $schema and parametersJsonSchema fields
+									delete(funcDeclMap, "$schema")
+									delete(funcDeclMap, "parametersJsonSchema")
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Antigravity requires a requestId and sessionId
 	// We can generate them here or leave them to be handled by the backend if it supports it.
 	// Looking at provider/antigravity/antigravity.go, it generates them.
@@ -5445,6 +5518,9 @@ func generateSessionID() string {
 }
 
 func ensureRoles(params map[string]any) {
+	// Delete model field as per reference implementation
+	delete(params, "model")
+
 	if si, ok := params["systemInstruction"].(map[string]any); ok {
 		if _, ok := si["role"]; !ok {
 			si["role"] = "user"

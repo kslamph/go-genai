@@ -16,8 +16,8 @@ import (
 
 // Gemini CLI Client ID and Secret (Publicly known for Cloud Code extension)
 const (
-	ClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	ClientSecret = "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"
+	ClientID     = "YOUR_CLIENT_ID"
+	ClientSecret = "YOUR_CLIENT_SECRET"
 	TokenURL     = "https://oauth2.googleapis.com/token"
 )
 
@@ -37,7 +37,7 @@ type Credentials struct {
 func (p *FileTokenProvider) Token(ctx context.Context) (*auth.Token, error) {
 	// 1. Read the credentials file
 
-data, err := os.ReadFile(p.Path)
+	data, err := os.ReadFile(p.Path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read credentials file: %w", err)
 	}
@@ -126,7 +126,7 @@ func main() {
 
 	// 2. Create the TokenProvider
 
-tokenProvider := &FileTokenProvider{Path: credsPath}
+	tokenProvider := &FileTokenProvider{Path: credsPath}
 	creds := auth.NewCredentials(&auth.CredentialsOptions{
 		TokenProvider: tokenProvider,
 	})
