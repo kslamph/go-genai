@@ -74,6 +74,7 @@ func (b *BaseCredentialInitializer) initializeCredential(
 	configureCredential func(*auth.Credential),
 	createProvider func(ctx context.Context, credID string) (provider.BaseProvider, error),
 	getDefaultModels func() []string,
+	authenticator interface{},
 ) error {
 	// Get token
 	token, err := getToken()
@@ -85,6 +86,11 @@ func (b *BaseCredentialInitializer) initializeCredential(
 	credID := fmt.Sprintf("%s-%d", authProviderType.String(), index)
 	cred := auth.NewCredential(credID, authProviderType)
 	cred.AccessToken = token
+
+	// Store the authenticator instance for token refresh operations
+	if authenticator != nil {
+		cred.SetAuthenticator(authenticator)
+	}
 
 	// Configure credential with provider-specific settings
 	configureCredential(cred)
@@ -201,6 +207,7 @@ func (g *GeminiCredentialInitializer) Initialize(ctx context.Context, cfg *confi
 				return g.createGeminiProvider(ctx, credID, helper)
 			},
 			g.getGeminiDefaultModels,
+			helper, // Pass the authenticator instance
 		); err != nil {
 			utils.L().Warnf("Failed to process Gemini credential from %s: %v", path, err)
 		}
@@ -289,6 +296,7 @@ func (a *AntigravityCredentialInitializer) Initialize(ctx context.Context, cfg *
 				return a.createAntigravityProvider(ctx, credID, helper)
 			},
 			a.getAntigravityDefaultModels,
+			helper, // Pass the authenticator instance
 		); err != nil {
 			utils.L().Warnf("Failed to process Antigravity credential from %s: %v", path, err)
 		}
@@ -332,6 +340,9 @@ func (q *QwenCredentialInitializer) Initialize(ctx context.Context, cfg *config.
 			cred := auth.NewCredential(credID, auth.ProviderTypeQwen)
 			cred.AccessToken = token
 			cred.Expiry = time.Now().Add(24 * time.Hour) // Qwen tokens last longer usually
+
+			// Store the authenticator instance for token refresh operations
+			cred.SetAuthenticator(helper)
 
 			// Create and set the provider instance
 			qwenProvider := qwen.NewProvider(credID, helper)
@@ -387,6 +398,9 @@ func (i *IFlowCredentialInitializer) Initialize(ctx context.Context, cfg *config
 			cred := auth.NewCredential(credID, auth.ProviderTypeIFlow)
 			cred.AccessToken = token
 			cred.Expiry = time.Now().Add(1 * time.Hour)
+
+			// Store the authenticator instance for token refresh operations
+			cred.SetAuthenticator(helper)
 
 			// Create and set the provider instance
 			iflowProvider := iflow.NewProvider(credID, helper)

@@ -147,8 +147,16 @@ func (m *Manager) RefreshClient(ctx context.Context, cred *Credential) error {
 // Provider-specific refresh methods (skeleton implementations)
 
 func (m *Manager) refreshGeminiToken(ctx context.Context, cred *Credential) error {
-	// Create authenticator with the config
-	auth := gemini.NewAuthenticator(m.geminiConfig)
+	// Get the stored authenticator from the credential
+	authInterface := cred.GetAuthenticator()
+	if authInterface == nil {
+		return fmt.Errorf("no authenticator stored in credential %s", cred.ID)
+	}
+
+	auth, ok := authInterface.(*gemini.Authenticator)
+	if !ok {
+		return fmt.Errorf("invalid authenticator type for credential %s", cred.ID)
+	}
 
 	// Force refresh the token
 	if err := auth.ForceRefresh(ctx); err != nil {
@@ -201,8 +209,16 @@ func (m *Manager) refreshGeminiToken(ctx context.Context, cred *Credential) erro
 }
 
 func (m *Manager) refreshIFlowToken(ctx context.Context, cred *Credential) error {
-	// Create authenticator with the config
-	auth := iflow.NewAuthenticator(m.iflowConfig)
+	// Get the stored authenticator from the credential
+	authInterface := cred.GetAuthenticator()
+	if authInterface == nil {
+		return fmt.Errorf("no authenticator stored in credential %s", cred.ID)
+	}
+
+	auth, ok := authInterface.(*iflow.Authenticator)
+	if !ok {
+		return fmt.Errorf("invalid authenticator type for credential %s", cred.ID)
+	}
 
 	// Get token which handles refresh internally
 	token, err := auth.GetToken(ctx)
@@ -229,8 +245,16 @@ func (m *Manager) refreshIFlowToken(ctx context.Context, cred *Credential) error
 }
 
 func (m *Manager) refreshQwenToken(ctx context.Context, cred *Credential) error {
-	// Create authenticator with the config
-	auth := qwen.NewAuthenticator(m.qwenConfig)
+	// Get the stored authenticator from the credential
+	authInterface := cred.GetAuthenticator()
+	if authInterface == nil {
+		return fmt.Errorf("no authenticator stored in credential %s", cred.ID)
+	}
+
+	auth, ok := authInterface.(*qwen.Authenticator)
+	if !ok {
+		return fmt.Errorf("invalid authenticator type for credential %s", cred.ID)
+	}
 
 	// Get token which handles refresh internally
 	token, err := auth.GetToken(ctx)
@@ -257,8 +281,16 @@ func (m *Manager) refreshQwenToken(ctx context.Context, cred *Credential) error 
 }
 
 func (m *Manager) refreshAntigravityToken(ctx context.Context, cred *Credential) error {
-	// Create authenticator with the config
-	auth := antigravity.NewAuthenticator(m.antigravityConfig)
+	// Get the stored authenticator from the credential
+	authInterface := cred.GetAuthenticator()
+	if authInterface == nil {
+		return fmt.Errorf("no authenticator stored in credential %s", cred.ID)
+	}
+
+	auth, ok := authInterface.(*antigravity.Authenticator)
+	if !ok {
+		return fmt.Errorf("invalid authenticator type for credential %s", cred.ID)
+	}
 
 	// Force refresh the token
 	if err := auth.ForceRefresh(ctx); err != nil {

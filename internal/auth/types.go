@@ -82,6 +82,10 @@ type Credential struct {
 	// This is the actual provider object that can execute requests
 	provider provider.BaseProvider `json:"-"`
 
+	// Authenticator instance for token refresh operations
+	// This stores the provider-specific authenticator with the correct credential path
+	authenticator interface{} `json:"-"`
+
 	// Mutex for thread-safe access
 	mu sync.RWMutex `json:"-"`
 }
@@ -214,6 +218,20 @@ func (c *Credential) SetProvider(p provider.BaseProvider) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.provider = p
+}
+
+// GetAuthenticator returns the authenticator instance for this credential
+func (c *Credential) GetAuthenticator() interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.authenticator
+}
+
+// SetAuthenticator sets the authenticator instance for this credential
+func (c *Credential) SetAuthenticator(auth interface{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authenticator = auth
 }
 
 // ClientPool represents a pool of clients for a credential
