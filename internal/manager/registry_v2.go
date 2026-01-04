@@ -1,6 +1,8 @@
 package manager
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -8,6 +10,48 @@ import (
 	"github.com/sunbankio/omniproxy/internal/auth"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 )
+
+// CredentialStatus represents the detailed status of a single credential for the admin UI.
+type CredentialStatus struct {
+	ID             string            `json:"id"`
+	ProviderType   auth.ProviderType `json:"provider_type"`
+	State          auth.CredentialState `json:"state"`
+	FailureCount   int               `json:"failure_count"`
+	AvailableAt    *time.Time        `json:"available_at,omitempty"` // Nil if not penalized
+	LastUsedAt     *time.Time        `json:"last_used_at,omitempty"`
+	Models         []string          `json:"models"`                 // Models this credential is registered for
+	ProjectID      string            `json:"project_id,omitempty"`
+	TokenExpiry    *time.Time        `json:"token_expiry,omitempty"`
+}
+
+// MarshalJSON implements the json.Marshaler interface for CredentialStatus.
+// It handles zero-value times correctly to avoid "year outside of range" errors.
+func (cs CredentialStatus) MarshalJSON() ([]byte, error) {
+	type Alias CredentialStatus // Alias to avoid infinite recursion
+	aux := &struct {
+		*Alias
+		AvailableAt *string `json:"available_at,omitempty"`
+		LastUsedAt  *string `json:"last_used_at,omitempty"`
+		TokenExpiry *string `json:"token_expiry,omitempty"`
+	}{
+		Alias: (*Alias)(&cs),
+	}
+
+	if cs.AvailableAt != nil && !cs.AvailableAt.IsZero() {
+		s := cs.AvailableAt.Format(time.RFC3339)
+		aux.AvailableAt = &s
+	}
+	if cs.LastUsedAt != nil && !cs.LastUsedAt.IsZero() {
+		s := cs.LastUsedAt.Format(time.RFC3339)
+		aux.LastUsedAt = &s
+	}
+	if cs.TokenExpiry != nil && !cs.TokenExpiry.IsZero() {
+		s := cs.TokenExpiry.Format(time.RFC3339)
+		aux.TokenExpiry = &s
+	}
+
+	return json.Marshal(aux)
+}
 
 // Registry stores the mapping between Virtual Models and Credentials
 type Registry struct {
@@ -373,4 +417,120 @@ func (p *CredentialPool) GetNextWithPenaltyInfo() (*auth.Credential, *InternalPe
 	}
 
 	return selectedCred, nil
+}
+
+// GetAllCredentialsStatus returns a snapshot of all credentials and their statuses.
+func (r *Registry) GetAllCredentialsStatus() []CredentialStatus {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var allStatuses []CredentialStatus
+	credToModels := make(map[string][]string)
+
+	// First, map credentials to the models they support
+	for modelName, pool := range r.modelPools {
+		pool.mu.RLock()
+		for _, cred := range pool.credentials {
+			credToModels[cred.ID] = append(credToModels[cred.ID], modelName)
+		}
+		pool.mu.RUnlock()
+	}
+
+	// Now, iterate through all credentials to build the status
+	for _, pool := range r.modelPools {
+		pool.mu.RLock()
+		for _, cred := range pool.credentials {
+			// Avoid adding the same credential multiple times if it's in multiple model pools
+			// This check is a bit naive but works for our current use case.
+			// A more robust solution might involve a global credential list.
+			found := false
+			for _, status := range allStatuses {
+				if status.ID == cred.ID {
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
+
+			status := CredentialStatus{
+				ID:           cred.ID,
+				ProviderType: cred.ProviderType,
+				State:        cred.State,
+				FailureCount: cred.FailureCount,
+				Models:       credToModels[cred.ID],
+				ProjectID:    cred.ProjectID,
+			}
+
+			// Handle pointers for time fields, ensuring they are not zero
+			if !cred.AvailableAt.IsZero() {
+				availableAt := cred.AvailableAt
+				status.AvailableAt = &availableAt
+			}
+			if !cred.LastUsedAt.IsZero() {
+				lastUsedAt := cred.LastUsedAt
+				status.LastUsedAt = &lastUsedAt
+			}
+			if !cred.Expiry.IsZero() {
+				tokenExpiry := cred.Expiry
+				status.TokenExpiry = &tokenExpiry
+			}
+
+			allStatuses = append(allStatuses, status)
+		}
+		pool.mu.RUnlock()
+	}
+
+	return allStatuses
+}
+
+// ResetCredentialPenalty finds a credential by its ID and resets its penalty state.
+func (r *Registry) ResetCredentialPenalty(credentialID string) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, pool := range r.modelPools {
+		pool.mu.Lock()
+		for _, cred := range pool.credentials {
+			if cred.ID == credentialID {
+				cred.AvailableAt = time.Time{} // Reset to zero time
+				cred.FailureCount = 0         // Reset failure count
+				if cred.State == auth.CredentialStateDead {
+					// Optionally, you could decide not to revive dead credentials.
+					// For now, we'll leave the state as is.
+					utils.L().Warnf("Attempted to reset penalty for a dead credential: %s. State remains Dead.", credentialID)
+				} else {
+					utils.L().Infof("Penalty reset for credential: %s", credentialID)
+				}
+				pool.mu.Unlock()
+				return nil
+			}
+		}
+		pool.mu.Unlock()
+	}
+
+	return fmt.Errorf("credential with ID '%s' not found", credentialID)
+}
+
+// GetModelsByProvider returns a map of provider types to their unique list of models.
+func (r *Registry) GetModelsByProvider() map[string][]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Use a map of slices to collect models, as model names are already unique keys in r.modelPools
+	modelsByProvider := make(map[string][]string)
+
+	for modelName, pool := range r.modelPools {
+		pool.mu.RLock()
+		if len(pool.credentials) > 0 {
+			// Get provider from the first credential in the pool
+			cred := pool.credentials[0]
+			providerName := cred.ProviderType.String()
+			modelsByProvider[providerName] = append(modelsByProvider[providerName], modelName)
+		}
+		pool.mu.RUnlock()
+	}
+
+	return modelsByProvider
 }

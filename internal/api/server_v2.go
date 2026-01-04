@@ -1,6 +1,7 @@
 package api
 
 import (
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -12,12 +13,16 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/sunbankio/omniproxy/internal/auth"
+	"github.com/sunbankio/omniproxy/internal/config"
 	"github.com/sunbankio/omniproxy/internal/manager"
 	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/internal/router"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 	"google.golang.org/genai"
 )
+
+//go:embed static/admin.html
+var adminHTML []byte
 
 // GeminiRequest represents the incoming Gemini API request structure
 type GeminiRequest struct {
@@ -147,16 +152,18 @@ func (r *GeminiRequest) toGenAIContents() []*genai.Content {
 }
 
 type ServerV2 struct {
-	sr       *router.SmartRouterV2
-	registry *manager.Registry
-	router   *chi.Mux
+	sr            *router.SmartRouterV2
+	registry      *manager.Registry
+	router        *chi.Mux
+	adminHandler  *AdminHandler
 }
 
-func NewServerV2(sr *router.SmartRouterV2, registry *manager.Registry) *ServerV2 {
+func NewServerV2(sr *router.SmartRouterV2, registry *manager.Registry, cfg *config.Config) *ServerV2 {
 	s := &ServerV2{
-		sr:       sr,
-		registry: registry,
-		router:   chi.NewRouter(),
+		sr:           sr,
+		registry:     registry,
+		router:       chi.NewRouter(),
+		adminHandler: NewAdminHandler(registry, cfg),
 	}
 	s.setupRoutes()
 	return s
@@ -188,6 +195,23 @@ func (s *ServerV2) setupRoutes() {
 	s.router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
+	})
+
+	// Admin UI and API routes
+	s.router.Route("/admin", func(r chi.Router) {
+		// Serve the main admin page
+		r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.Write(adminHTML)
+		})
+
+		// API endpoints
+		r.Route("/api", func(r chi.Router) {
+			r.Get("/credentials", s.adminHandler.HandleListCredentials)
+			r.Post("/credentials/{id}/reset", s.adminHandler.HandleResetPenalty)
+			r.Get("/config", s.adminHandler.HandleGetConfig)
+			r.Get("/models", s.adminHandler.HandleGetModels)
+		})
 	})
 }
 

@@ -57,7 +57,7 @@ func main() {
 	sr := router.NewSmartRouterV2(authMgr, registry, registry)
 
 	// E. Server (V2)
-	server := api.NewServerV2(sr, registry)
+	server := api.NewServerV2(sr, registry, cfg)
 
 	// F. Cleanup Routine
 	go manager.StartCleanupRoutine(ctx, registry)
