@@ -586,9 +586,6 @@ func sendSSEEvent(w http.ResponseWriter, eventType string, data interface{}) err
 
 // HandleAnthropicMessages handles the /v1/messages endpoint
 func (s *ServerV2) HandleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
-	// Check if streaming is requested (based on Accept header)
-	isStream := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
-
 	// Read request body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -598,7 +595,21 @@ func (s *ServerV2) HandleAnthropicMessages(w http.ResponseWriter, r *http.Reques
 	}
 	defer r.Body.Close()
 
-	// Parse Anthropic request
+	// Parse stream parameter from request body first (following Anthropic API standard)
+	// stream=true means explicit request for streaming
+	var rawReq map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &rawReq); err != nil {
+		utils.L().Errorf("Failed to decode Anthropic request: %v", err)
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	isStream := false
+	if stream, ok := rawReq["stream"].(bool); ok {
+		isStream = stream
+	}
+
+	// Parse Anthropic request into SDK type
 	var anthropicReq anthropic.MessageNewParams
 	if err := json.Unmarshal(bodyBytes, &anthropicReq); err != nil {
 		utils.L().Errorf("Failed to decode Anthropic request: %v", err)
