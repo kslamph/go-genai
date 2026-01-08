@@ -12,6 +12,7 @@ type TokenGetter interface {
 type TokenTransport struct {
 	Transport   http.RoundTripper
 	TokenGetter TokenGetter
+	UserAgent   string
 }
 
 func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -23,7 +24,9 @@ func (t *TokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone the request to avoid race conditions
 	newReq := req.Clone(req.Context())
 	newReq.Header.Set("Authorization", "Bearer "+token)
-	newReq.Header.Set("User-Agent", "iflow-cli/0.4.11")
+	if t.UserAgent != "" {
+		newReq.Header.Set("User-Agent", t.UserAgent)
+	}
 
 	transport := t.Transport
 	if transport == nil {

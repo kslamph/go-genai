@@ -23,6 +23,7 @@ func NewProvider(name string, auth *Authenticator) *Provider {
 	config.HTTPClient = &http.Client{
 		Transport: &common.TokenTransport{
 			TokenGetter: auth,
+			UserAgent:   "QwenCode/0.6.0 (linux; x64)",
 		},
 	}
 	client := openai.NewClientWithConfig(config)

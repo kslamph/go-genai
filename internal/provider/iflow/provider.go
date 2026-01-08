@@ -25,6 +25,7 @@ func NewProvider(name string, auth *Authenticator) *Provider {
 	config.HTTPClient = &http.Client{
 		Transport: &common.TokenTransport{
 			TokenGetter: auth,
+			UserAgent:   "iFlow-Cli",
 		},
 	}
 	client := openai.NewClientWithConfig(config)
@@ -112,14 +113,22 @@ func (p *Provider) wrapError(err error) error {
 
 func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 	return []string{
+		"iflow-rome-30ba3b",
 		"qwen3-coder-plus",
 		"qwen3-max",
 		"qwen3-vl-plus",
+		"qwen3-max-preview",
+		"qwen3-32b",
+		"qwen3-235b-a22b-thinking-2507",
+		"qwen3-235b-a22b-instruct",
+		"qwen3-235b",
 		"kimi-k2-0905",
 		"kimi-k2",
 		"glm-4.6",
+		"glm-4.7",
 		"deepseek-v3.2",
 		"deepseek-r1",
+		"deepseek-v3",
 	}, nil
 }
 
