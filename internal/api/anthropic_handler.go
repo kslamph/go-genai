@@ -29,9 +29,13 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 	if anthropicReq.TopP.Valid() {
 		openAIReq.TopP = param.NewOpt(anthropicReq.TopP.Value)
 	}
-	// MaxTokens is required in Anthropic, use param.NewOpt
+	if anthropicReq.TopK.Valid() {
+		// OpenAI doesn't have top_k, but we can approximate with temperature
+		// This is a limitation of the OpenAI API
+	}
+	// MaxTokens is required in Anthropic
 	if anthropicReq.MaxTokens > 0 {
-		openAIReq.MaxTokens = param.NewOpt(int64(anthropicReq.MaxTokens))
+		openAIReq.MaxTokens = param.NewOpt(anthropicReq.MaxTokens)
 	}
 
 	// Convert messages
@@ -53,12 +57,13 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 	for _, msg := range anthropicReq.Messages {
 		role := msg.Role
 		if role == "user" {
-			userMsg := openai.UserMessage("")
-			
+			// Build content parts for user message
+			var contentParts []openai.ChatCompletionContentPartUnionParam
+
 			// Handle content blocks
 			for _, block := range msg.Content {
 				if textBlock := block.OfText; textBlock != nil {
-					userMsg = openai.UserMessage(textBlock.Text)
+					contentParts = append(contentParts, openai.TextContentPart(textBlock.Text))
 				} else if imageBlock := block.OfImage; imageBlock != nil {
 					// Convert image to OpenAI format
 					imageURL := ""
@@ -67,30 +72,162 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 					} else if source := imageBlock.Source.OfURL; source != nil {
 						imageURL = source.URL
 					}
-					userMsg = openai.UserMessage(imageURL)
+					contentParts = append(contentParts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+						URL: imageURL,
+					}))
 				}
 			}
-			messages = append(messages, userMsg)
+
+			// Create user message with content parts
+			if len(contentParts) == 0 {
+				// Empty content - use empty string
+				messages = append(messages, openai.UserMessage(""))
+			} else if len(contentParts) == 1 {
+				// Single content part - can use simplified form
+				if textPart := contentParts[0].OfText; textPart != nil {
+					messages = append(messages, openai.UserMessage(textPart.Text))
+				} else {
+					messages = append(messages, openai.UserMessage(contentParts))
+				}
+			} else {
+				// Multiple content parts - use array form
+				messages = append(messages, openai.UserMessage(contentParts))
+			}
 		} else if role == "assistant" {
-			assistantMsg := openai.AssistantMessage("")
-			
+			// Handle assistant message with potential tool calls
+			var contentParts []openai.ChatCompletionAssistantMessageParamContentArrayOfContentPartUnion
+			var toolCalls []openai.ChatCompletionMessageToolCallUnionParam
+
 			// Handle content blocks
 			for _, block := range msg.Content {
 				if textBlock := block.OfText; textBlock != nil {
-					assistantMsg = openai.AssistantMessage(textBlock.Text)
+					contentParts = append(contentParts, openai.ChatCompletionAssistantMessageParamContentArrayOfContentPartUnion{
+						OfText: &openai.ChatCompletionContentPartTextParam{
+							Type: "text",
+							Text: textBlock.Text,
+						},
+					})
+				} else if toolUseBlock := block.OfToolUse; toolUseBlock != nil {
+					// Convert tool use to OpenAI tool call
+					// toolUseBlock.Input is json.RawMessage (any), need to convert to string
+					inputStr := ""
+					if toolUseBlock.Input != nil {
+						inputBytes, ok := toolUseBlock.Input.([]byte)
+						if ok {
+							inputStr = string(inputBytes)
+						} else {
+							// Try to marshal to JSON
+							if jsonBytes, err := json.Marshal(toolUseBlock.Input); err == nil {
+								inputStr = string(jsonBytes)
+							}
+						}
+					}
+					// Create function tool call
+					toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+						OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+							ID:   toolUseBlock.ID,
+							Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+								Name:      toolUseBlock.Name,
+								Arguments: inputStr,
+							},
+						},
+					})
 				}
 			}
-			
-			// Handle tool results (tool use responses)
-			// These would come from separate ToolResult blocks
-			messages = append(messages, assistantMsg)
+
+			// Create assistant message
+			if len(toolCalls) > 0 {
+				// Has tool calls - create assistant message with tool calls
+				assistantMsg := openai.ChatCompletionAssistantMessageParam{
+					Role:      "assistant",
+					ToolCalls: toolCalls,
+				}
+				if len(contentParts) > 0 {
+					assistantMsg.Content = openai.ChatCompletionAssistantMessageParamContentUnion{
+						OfArrayOfContentParts: contentParts,
+					}
+				}
+				messages = append(messages, openai.ChatCompletionMessageParamUnion{
+					OfAssistant: &assistantMsg,
+				})
+			} else if len(contentParts) > 0 {
+				// Only content parts
+				if len(contentParts) == 1 && contentParts[0].OfText != nil {
+					messages = append(messages, openai.AssistantMessage(contentParts[0].OfText.Text))
+				} else {
+					messages = append(messages, openai.AssistantMessage(contentParts))
+				}
+			} else {
+				// Empty assistant message
+				messages = append(messages, openai.AssistantMessage(""))
+			}
 		}
 	}
 
 	openAIReq.Messages = messages
 
-	// Note: Tools conversion is complex and requires more detailed implementation
-	// For now, we'll skip tool conversion as it requires careful mapping
+	// Convert tools
+	if len(anthropicReq.Tools) > 0 {
+		openAITools := make([]openai.ChatCompletionToolUnionParam, 0, len(anthropicReq.Tools))
+		for _, tool := range anthropicReq.Tools {
+			if toolDef := tool.OfTool; toolDef != nil {
+				var description param.Opt[string]
+				if toolDef.Description.Valid() {
+					description = param.NewOpt(toolDef.Description.Value)
+				}
+
+				// Convert Anthropic ToolInputSchemaParam to OpenAI FunctionParameters
+				// Both are JSON schemas, we need to convert between them
+				var parameters openai.FunctionParameters
+				if param.IsOmitted(toolDef.InputSchema) == false {
+					// Marshal and unmarshal to convert types
+					schemaBytes, err := json.Marshal(toolDef.InputSchema)
+					if err != nil {
+						return nil, fmt.Errorf("failed to marshal tool input schema: %w", err)
+					}
+					if err := json.Unmarshal(schemaBytes, &parameters); err != nil {
+						return nil, fmt.Errorf("failed to unmarshal tool input schema: %w", err)
+					}
+				}
+
+				openAITools = append(openAITools, openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+					Name:        toolDef.Name,
+					Description: description,
+					Parameters:  parameters,
+				}))
+			}
+		}
+		openAIReq.Tools = openAITools
+	}
+
+	// Convert tool choice
+	// Check which variant is set
+	if anthropicReq.ToolChoice.OfAuto != nil {
+		openAIReq.ToolChoice.OfAuto = param.NewOpt("auto")
+	} else if anthropicReq.ToolChoice.OfAny != nil {
+		openAIReq.ToolChoice.OfAllowedTools = &openai.ChatCompletionAllowedToolChoiceParam{
+			Type: "allowed_tools",
+		}
+	} else if anthropicReq.ToolChoice.OfTool != nil {
+		tool := anthropicReq.ToolChoice.OfTool
+		openAIReq.ToolChoice.OfFunctionToolChoice = &openai.ChatCompletionNamedToolChoiceParam{
+			Type: "function",
+			Function: openai.ChatCompletionNamedToolChoiceFunctionParam{
+				Name: tool.Name,
+			},
+		}
+	}
+
+	// Convert stop sequences
+	if len(anthropicReq.StopSequences) > 0 {
+		openAIReq.Stop.OfStringArray = anthropicReq.StopSequences
+	}
+
+	// Note: OpenAI doesn't have direct equivalents for:
+	// - Metadata (can be passed in user field)
+	// - ServiceTier (OpenAI has different tier system)
+	// - Thinking (extended thinking is Anthropic-specific)
+	// - TopK (OpenAI uses temperature and top_p)
 
 	return openAIReq, nil
 }
@@ -103,7 +240,7 @@ func convertOpenAIResponseToAnthropic(openAIResp *openai.ChatCompletion) (*anthr
 
 	choice := openAIResp.Choices[0]
 
-	// Map stop reason - v3 uses string values
+	// Map stop reason - OpenAI uses string values
 	stopReason := anthropic.StopReasonEndTurn
 	switch choice.FinishReason {
 	case "stop":
@@ -116,7 +253,7 @@ func convertOpenAIResponseToAnthropic(openAIResp *openai.ChatCompletion) (*anthr
 		stopReason = anthropic.StopReasonStopSequence
 	}
 
-	// Convert content blocks
+	// Convert content blocks - construct ContentBlockUnion manually
 	contentBlocks := []anthropic.ContentBlockUnion{}
 
 	// Handle text content
@@ -129,16 +266,16 @@ func convertOpenAIResponseToAnthropic(openAIResp *openai.ChatCompletion) (*anthr
 
 	// Handle tool calls
 	for _, toolCall := range choice.Message.ToolCalls {
-		inputJSON := json.RawMessage(toolCall.Function.Arguments)
+		// Convert tool call to Anthropic tool use block
 		contentBlocks = append(contentBlocks, anthropic.ContentBlockUnion{
 			Type:  "tool_use",
 			ID:    toolCall.ID,
 			Name:  toolCall.Function.Name,
-			Input: inputJSON,
+			Input: json.RawMessage(toolCall.Function.Arguments),
 		})
 	}
 
-	// Build Anthropic message
+	// Build Anthropic message using official SDK types
 	anthropicMsg := &anthropic.Message{
 		ID:           openAIResp.ID,
 		Type:         "message",
@@ -166,11 +303,12 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 	w.Header().Set("Connection", "keep-alive")
 
 	decoder := json.NewDecoder(openAIStream)
-	currentBlockIndex := 0
+	currentBlockIndex := int64(0)
 	currentBlockType := ""
 	messageID := ""
 	model := ""
-	outputTokens := 0
+	inputTokens := int64(0)
+	outputTokens := int64(0)
 
 	for {
 		var openAIChunk openai.ChatCompletionChunk
@@ -187,19 +325,19 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 			model = openAIChunk.Model
 
 			// Send message_start event
-			msgStart := map[string]interface{}{
-				"type": "message_start",
-				"message": map[string]interface{}{
-					"id":      messageID,
-					"type":    "message",
-					"role":    "assistant",
-					"content": []interface{}{},
-					"model":   model,
-					"stop_reason": nil,
-					"stop_sequence": nil,
-					"usage": map[string]interface{}{
-						"input_tokens":  0,
-						"output_tokens": 0,
+			msgStart := anthropic.MessageStreamEventUnion{
+				Type: "message_start",
+				Message: anthropic.Message{
+					ID:      messageID,
+					Type:    "message",
+					Role:    "assistant",
+					Content: []anthropic.ContentBlockUnion{},
+					Model:   anthropic.Model(model),
+					StopReason: anthropic.StopReasonEndTurn,
+					StopSequence: "",
+					Usage: anthropic.Usage{
+						InputTokens:  inputTokens,
+						OutputTokens: outputTokens,
 					},
 				},
 			}
@@ -215,33 +353,34 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 				if currentBlockType != "text" {
 					// Stop previous block if needed
 					if currentBlockType != "" {
-						sendSSEEvent(w, "content_block_stop", map[string]interface{}{
-							"type":  "content_block_stop",
-							"index": currentBlockIndex,
-						})
+						blockStop := anthropic.MessageStreamEventUnion{
+							Type:  "content_block_stop",
+							Index: currentBlockIndex,
+						}
+						sendSSEEvent(w, "content_block_stop", blockStop)
 						currentBlockIndex++
 					}
 
 					// Start new text block
 					currentBlockType = "text"
-					blockStart := map[string]interface{}{
-						"type": "content_block_start",
-						"index": currentBlockIndex,
-						"content_block": map[string]interface{}{
-							"type": "text",
-							"text": "",
+					blockStart := anthropic.MessageStreamEventUnion{
+						Type:  "content_block_start",
+						Index: currentBlockIndex,
+						ContentBlock: anthropic.ContentBlockStartEventContentBlockUnion{
+							Type: "text",
+							Text: "",
 						},
 					}
 					sendSSEEvent(w, "content_block_start", blockStart)
 				}
 
 				// Send text delta
-				textDelta := map[string]interface{}{
-					"type": "content_block_delta",
-					"index": currentBlockIndex,
-					"delta": map[string]interface{}{
-						"type": "text_delta",
-						"text": delta.Content,
+				textDelta := anthropic.MessageStreamEventUnion{
+					Type:  "content_block_delta",
+					Index: currentBlockIndex,
+					Delta: anthropic.MessageStreamEventUnionDelta{
+						Type: "text_delta",
+						Text: delta.Content,
 					},
 				}
 				sendSSEEvent(w, "content_block_delta", textDelta)
@@ -258,24 +397,25 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 					if toolID != "" && currentBlockType != "tool_use_"+toolID {
 						// Stop previous block if needed
 						if currentBlockType != "" {
-							sendSSEEvent(w, "content_block_stop", map[string]interface{}{
-								"type":  "content_block_stop",
-								"index": currentBlockIndex,
-							})
+							blockStop := anthropic.MessageStreamEventUnion{
+								Type:  "content_block_stop",
+								Index: currentBlockIndex,
+							}
+							sendSSEEvent(w, "content_block_stop", blockStop)
 							currentBlockIndex++
 						}
 
 						currentBlockType = "tool_use_" + toolID
 
 						// Start tool use block
-						blockStart := map[string]interface{}{
-							"type": "content_block_start",
-							"index": currentBlockIndex,
-							"content_block": map[string]interface{}{
-								"type": "tool_use",
-								"id":   toolID,
-								"name": toolName,
-								"input": map[string]interface{}{},
+						blockStart := anthropic.MessageStreamEventUnion{
+							Type:  "content_block_start",
+							Index: currentBlockIndex,
+							ContentBlock: anthropic.ContentBlockStartEventContentBlockUnion{
+								Type:  "tool_use",
+								ID:    toolID,
+								Name:  toolName,
+								Input: json.RawMessage("{}"),
 							},
 						}
 						sendSSEEvent(w, "content_block_start", blockStart)
@@ -283,12 +423,12 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 
 					// Send input JSON delta
 					if toolArgs != "" {
-						inputDelta := map[string]interface{}{
-							"type": "content_block_delta",
-							"index": currentBlockIndex,
-							"delta": map[string]interface{}{
-								"type":         "input_json_delta",
-								"partial_json": toolArgs,
+						inputDelta := anthropic.MessageStreamEventUnion{
+							Type:  "content_block_delta",
+							Index: currentBlockIndex,
+							Delta: anthropic.MessageStreamEventUnionDelta{
+								Type:         "input_json_delta",
+								PartialJSON: toolArgs,
 							},
 						}
 						sendSSEEvent(w, "content_block_delta", inputDelta)
@@ -296,54 +436,56 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 				}
 			}
 
-			// Handle finish reason - v3 uses string values
+			// Handle finish reason - OpenAI uses string values
 			finishReason := openAIChunk.Choices[0].FinishReason
 			if finishReason != "" {
 				// Stop current block
 				if currentBlockType != "" {
-					sendSSEEvent(w, "content_block_stop", map[string]interface{}{
-						"type":  "content_block_stop",
-						"index": currentBlockIndex,
-					})
+					blockStop := anthropic.MessageStreamEventUnion{
+						Type:  "content_block_stop",
+						Index: currentBlockIndex,
+					}
+					sendSSEEvent(w, "content_block_stop", blockStop)
 					currentBlockIndex++
 					currentBlockType = ""
 				}
 
 				// Map stop reason
-				stopReason := "end_turn"
+				stopReason := anthropic.StopReasonEndTurn
 				switch finishReason {
 				case "stop":
-					stopReason = "end_turn"
+					stopReason = anthropic.StopReasonEndTurn
 				case "length":
-					stopReason = "max_tokens"
+					stopReason = anthropic.StopReasonMaxTokens
 				case "tool_calls":
-					stopReason = "tool_use"
+					stopReason = anthropic.StopReasonToolUse
 				case "content_filter":
-					stopReason = "stop_sequence"
+					stopReason = anthropic.StopReasonStopSequence
 				}
 
-				// Update output tokens if available (Usage is a struct, not pointer in v3)
+				// Update output tokens if available
 				if openAIChunk.Usage.CompletionTokens > 0 {
-					outputTokens = int(openAIChunk.Usage.CompletionTokens)
+					outputTokens = openAIChunk.Usage.CompletionTokens
 				}
 
 				// Send message delta
-				msgDelta := map[string]interface{}{
-					"type": "message_delta",
-					"delta": map[string]interface{}{
-						"stop_reason":   stopReason,
-						"stop_sequence": nil,
+				msgDelta := anthropic.MessageStreamEventUnion{
+					Type: "message_delta",
+					Delta: anthropic.MessageStreamEventUnionDelta{
+						StopReason:   stopReason,
+						StopSequence: "",
 					},
-					"usage": map[string]interface{}{
-						"output_tokens": outputTokens,
+					Usage: anthropic.MessageDeltaUsage{
+						OutputTokens: outputTokens,
 					},
 				}
 				sendSSEEvent(w, "message_delta", msgDelta)
 
 				// Send message stop
-				sendSSEEvent(w, "message_stop", map[string]interface{}{
-					"type": "message_stop",
-				})
+				msgStop := anthropic.MessageStreamEventUnion{
+					Type: "message_stop",
+				}
+				sendSSEEvent(w, "message_stop", msgStop)
 			}
 		}
 	}
@@ -399,10 +541,6 @@ func (s *ServerV2) HandleAnthropicMessages(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "failed to convert request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	// Note: In openai-go v3, streaming is handled by using Chat.Completions.NewStreaming()
-	// instead of setting a Stream flag on the params. The IsStream field in the router
-	// request is used to determine which method to call.
 
 	// Create router request
 	routerReq := &router.Request{
