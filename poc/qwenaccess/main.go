@@ -48,8 +48,8 @@ func main() {
 	// Test 1: Simple completion
 	fmt.Printf("\nTesting simple completion with model: %s\n", model)
 	resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Model:     openai.ChatModel(model),
-		Messages:  []openai.ChatCompletionMessageParamUnion{openai.UserMessage("Explain Go pointers in one sentence.")},
+		Model:    openai.ChatModel(model),
+		Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("Explain Go pointers in one sentence.")},
 	})
 
 	if err != nil {

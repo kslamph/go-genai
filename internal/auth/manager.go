@@ -408,7 +408,7 @@ func (m *Manager) refreshAntigravityClient(ctx context.Context, cred *Credential
 		tokenProvider,
 		projectID,
 		genai.BackendAntigravity, // Use Antigravity backend
-		"", // Empty BaseURL - let library auto-detect
+		"",                       // Empty BaseURL - let library auto-detect
 	)
 
 	if err != nil {

@@ -38,6 +38,10 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 		openAIReq.MaxTokens = param.NewOpt(anthropicReq.MaxTokens)
 	}
 
+	// Set stream options to include usage in streaming responses
+	// This is needed to get accurate token counts in streaming mode
+	openAIReq.StreamOptions.IncludeUsage = param.NewOpt(true)
+
 	// Convert messages
 	messages := []openai.ChatCompletionMessageParamUnion{}
 
@@ -70,24 +74,36 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 				// Handle tool result messages - convert to OpenAI tool messages
 				// In Anthropic, tool results are sent as user messages with tool_result blocks
 				// In OpenAI, each tool result needs to be a separate tool message
+				// Note: OpenAI tool messages only support text content, not images
 				for _, block := range msg.Content {
 					if toolResultBlock := block.OfToolResult; toolResultBlock != nil {
 						// Convert tool result to OpenAI tool message
-						var content string
-						
+						// Only text content is supported in OpenAI tool messages
+						var contentParts []openai.ChatCompletionContentPartTextParam
+
 						// Handle content parts
 						for _, contentPart := range toolResultBlock.Content {
 							if textPart := contentPart.OfText; textPart != nil {
-								// If we already have content, append with newline
-								if content != "" {
-									content += "\n"
-								}
-								content += textPart.Text
+								contentParts = append(contentParts, openai.ChatCompletionContentPartTextParam{
+									Type: "text",
+									Text: textPart.Text,
+								})
 							}
+							// Note: Images in tool results are not supported by OpenAI API
+							// They are silently ignored
 						}
 
-						// Create tool message
-						messages = append(messages, openai.ToolMessage(content, toolResultBlock.ToolUseID))
+						// Create tool message with content parts
+						if len(contentParts) == 0 {
+							// Empty content - use empty string
+							messages = append(messages, openai.ToolMessage("", toolResultBlock.ToolUseID))
+						} else if len(contentParts) == 1 {
+							// Single content part - can use simplified form
+							messages = append(messages, openai.ToolMessage(contentParts[0].Text, toolResultBlock.ToolUseID))
+						} else {
+							// Multiple content parts - use array form
+							messages = append(messages, openai.ToolMessage(contentParts, toolResultBlock.ToolUseID))
+						}
 					}
 				}
 			} else {
@@ -161,7 +177,7 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 					// Create function tool call
 					toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallUnionParam{
 						OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
-							ID:   toolUseBlock.ID,
+							ID: toolUseBlock.ID,
 							Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
 								Name:      toolUseBlock.Name,
 								Arguments: inputStr,
@@ -203,8 +219,9 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 	openAIReq.Messages = messages
 
 	// Convert tools
+	var openAITools []openai.ChatCompletionToolUnionParam
 	if len(anthropicReq.Tools) > 0 {
-		openAITools := make([]openai.ChatCompletionToolUnionParam, 0, len(anthropicReq.Tools))
+		openAITools = make([]openai.ChatCompletionToolUnionParam, 0, len(anthropicReq.Tools))
 		for _, tool := range anthropicReq.Tools {
 			if toolDef := tool.OfTool; toolDef != nil {
 				var description param.Opt[string]
@@ -241,8 +258,25 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 	if anthropicReq.ToolChoice.OfAuto != nil {
 		openAIReq.ToolChoice.OfAuto = param.NewOpt("auto")
 	} else if anthropicReq.ToolChoice.OfAny != nil {
-		openAIReq.ToolChoice.OfAllowedTools = &openai.ChatCompletionAllowedToolChoiceParam{
-			Type: "allowed_tools",
+		// Map "any" to "required" - forces the model to call a tool
+		// We need to use OfAllowedTools with Mode: "required" and include all tools
+		if len(openAITools) > 0 {
+			// Convert tools to the format expected by ChatCompletionAllowedToolsParam
+			tools := make([]map[string]any, len(openAITools))
+			for i, tool := range openAITools {
+				tools[i] = map[string]any{
+					"type":     "function",
+					"function": tool,
+				}
+			}
+			allowedTools := openai.ChatCompletionAllowedToolsParam{
+				Mode:  openai.ChatCompletionAllowedToolsModeRequired,
+				Tools: tools,
+			}
+			openAIReq.ToolChoice = openai.ToolChoiceOptionAllowedTools(allowedTools)
+		} else {
+			// Fallback to auto if no tools are defined
+			openAIReq.ToolChoice.OfAuto = param.NewOpt("auto")
 		}
 	} else if anthropicReq.ToolChoice.OfTool != nil {
 		tool := anthropicReq.ToolChoice.OfTool
@@ -364,12 +398,12 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 			msgStart := anthropic.MessageStreamEventUnion{
 				Type: "message_start",
 				Message: anthropic.Message{
-					ID:      messageID,
-					Type:    "message",
-					Role:    "assistant",
-					Content: []anthropic.ContentBlockUnion{},
-					Model:   anthropic.Model(model),
-					StopReason: anthropic.StopReasonEndTurn,
+					ID:           messageID,
+					Type:         "message",
+					Role:         "assistant",
+					Content:      []anthropic.ContentBlockUnion{},
+					Model:        anthropic.Model(model),
+					StopReason:   anthropic.StopReasonEndTurn,
 					StopSequence: "",
 					Usage: anthropic.Usage{
 						InputTokens:  inputTokens,
@@ -429,8 +463,13 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 					toolName := toolCall.Function.Name
 					toolArgs := toolCall.Function.Arguments
 
+					// Skip if we don't have a tool ID (can happen in some streaming scenarios)
+					if toolID == "" {
+						continue
+					}
+
 					// Check if this is a new tool call
-					if toolID != "" && currentBlockType != "tool_use_"+toolID {
+					if currentBlockType != "tool_use_"+toolID {
 						// Stop previous block if needed
 						if currentBlockType != "" {
 							blockStop := anthropic.MessageStreamEventUnion{
@@ -463,7 +502,7 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 							Type:  "content_block_delta",
 							Index: currentBlockIndex,
 							Delta: anthropic.MessageStreamEventUnionDelta{
-								Type:         "input_json_delta",
+								Type:        "input_json_delta",
 								PartialJSON: toolArgs,
 							},
 						}
@@ -499,7 +538,10 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 					stopReason = anthropic.StopReasonStopSequence
 				}
 
-				// Update output tokens if available
+				// Update usage if available (from stream_options: {"include_usage": true})
+				if openAIChunk.Usage.PromptTokens > 0 {
+					inputTokens = openAIChunk.Usage.PromptTokens
+				}
 				if openAIChunk.Usage.CompletionTokens > 0 {
 					outputTokens = openAIChunk.Usage.CompletionTokens
 				}

@@ -13,15 +13,15 @@ import (
 
 // CredentialStatus represents the detailed status of a single credential for the admin UI.
 type CredentialStatus struct {
-	ID             string            `json:"id"`
-	ProviderType   auth.ProviderType `json:"provider_type"`
-	State          auth.CredentialState `json:"state"`
-	FailureCount   int               `json:"failure_count"`
-	AvailableAt    *time.Time        `json:"available_at,omitempty"` // Nil if not penalized
-	LastUsedAt     *time.Time        `json:"last_used_at,omitempty"`
-	Models         []string          `json:"models"`                 // Models this credential is registered for
-	ProjectID      string            `json:"project_id,omitempty"`
-	TokenExpiry    *time.Time        `json:"token_expiry,omitempty"`
+	ID           string               `json:"id"`
+	ProviderType auth.ProviderType    `json:"provider_type"`
+	State        auth.CredentialState `json:"state"`
+	FailureCount int                  `json:"failure_count"`
+	AvailableAt  *time.Time           `json:"available_at,omitempty"` // Nil if not penalized
+	LastUsedAt   *time.Time           `json:"last_used_at,omitempty"`
+	Models       []string             `json:"models"` // Models this credential is registered for
+	ProjectID    string               `json:"project_id,omitempty"`
+	TokenExpiry  *time.Time           `json:"token_expiry,omitempty"`
 }
 
 // MarshalJSON implements the json.Marshaler interface for CredentialStatus.
@@ -495,7 +495,7 @@ func (r *Registry) ResetCredentialPenalty(credentialID string) error {
 		for _, cred := range pool.credentials {
 			if cred.ID == credentialID {
 				cred.AvailableAt = time.Time{} // Reset to zero time
-				cred.FailureCount = 0         // Reset failure count
+				cred.FailureCount = 0          // Reset failure count
 				if cred.State == auth.CredentialStateDead {
 					// Optionally, you could decide not to revive dead credentials.
 					// For now, we'll leave the state as is.
