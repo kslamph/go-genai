@@ -183,6 +183,7 @@ func (s *ServerV2) setupRoutes() {
 	// OpenAI-compatible API
 	s.router.Route("/v1", func(r chi.Router) {
 		r.Post("/chat/completions", s.HandleOpenAIChatCompletions)
+		r.Post("/messages", s.HandleAnthropicMessages)
 		r.Get("/models", s.HandleListModels)
 	})
 
