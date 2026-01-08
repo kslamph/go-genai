@@ -497,8 +497,16 @@ func (r *SmartRouterV2) executeOpenAI(ctx context.Context, cred *auth.Credential
 	case openai.ChatCompletionNewParams:
 		openAIReq = p
 	default:
-		// Try to decode from JSON
-		data, err := json.Marshal(req.Payload)
+		// Try to decode from JSON - use raw bytes for better error handling
+		payloadMap, ok := req.Payload.(map[string]interface{})
+		if !ok {
+			return nil, &provider.ProviderError{
+				StatusCode: http.StatusBadRequest,
+				Message:    "invalid request payload format",
+				Provider:   string(cred.Type()),
+			}
+		}
+		data, err := json.Marshal(payloadMap)
 		if err != nil {
 			return nil, &provider.ProviderError{
 				StatusCode: http.StatusBadRequest,
@@ -509,7 +517,7 @@ func (r *SmartRouterV2) executeOpenAI(ctx context.Context, cred *auth.Credential
 		if err := json.Unmarshal(data, &openAIReq); err != nil {
 			return nil, &provider.ProviderError{
 				StatusCode: http.StatusBadRequest,
-				Message:    fmt.Sprintf("failed to unmarshal OpenAI request: %v", err),
+				Message:    fmt.Sprintf("invalid OpenAI request format: %v. Content arrays must use format: [{\"type\": \"text\", \"text\": \"...\"}]", err),
 				Provider:   string(cred.Type()),
 			}
 		}
