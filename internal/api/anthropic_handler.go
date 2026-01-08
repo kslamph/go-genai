@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -372,20 +373,52 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	decoder := json.NewDecoder(openAIStream)
+	// Use bufio to read lines for SSE format handling
+	scanner := bufio.NewScanner(openAIStream)
+	
 	currentBlockIndex := int64(0)
 	currentBlockType := ""
 	messageID := ""
 	model := ""
 	inputTokens := int64(0)
 	outputTokens := int64(0)
+	
+	// Track tool calls by index for streaming
+	type toolCallState struct {
+		ID      string
+		Name    string
+		Args    strings.Builder
+		Started bool
+	}
+	toolCalls := make(map[int64]*toolCallState)
 
-	for {
+	for scanner.Scan() {
+		line := scanner.Text()
+		
+		// Skip empty lines
+		if line == "" {
+			continue
+		}
+		
+		// Handle SSE format: strip "data: " prefix
+		if strings.HasPrefix(line, "data: ") {
+			line = strings.TrimPrefix(line, "data: ")
+		} else if strings.HasPrefix(line, "data:") {
+			line = strings.TrimPrefix(line, "data:")
+		} else {
+			// Skip non-data lines (like comments, event types, etc.)
+			continue
+		}
+		
+		// Skip "[DONE]" marker
+		if line == "[DONE]" {
+			break
+		}
+		
+		// Parse JSON
 		var openAIChunk openai.ChatCompletionChunk
-		if err := decoder.Decode(&openAIChunk); err != nil {
-			if err == io.EOF {
-				break
-			}
+		if err := json.Unmarshal([]byte(line), &openAIChunk); err != nil {
+			utils.L().Errorf("Failed to decode streaming chunk: %v. Raw data: %s", err, line)
 			return err
 		}
 
@@ -459,17 +492,28 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 			// Tool calls
 			if len(delta.ToolCalls) > 0 {
 				for _, toolCall := range delta.ToolCalls {
+					toolIndex := toolCall.Index
 					toolID := toolCall.ID
 					toolName := toolCall.Function.Name
 					toolArgs := toolCall.Function.Arguments
 
-					// Skip if we don't have a tool ID (can happen in some streaming scenarios)
-					if toolID == "" {
-						continue
+					// Get or create tool call state
+					state, exists := toolCalls[toolIndex]
+					if !exists {
+						state = &toolCallState{}
+						toolCalls[toolIndex] = state
 					}
 
-					// Check if this is a new tool call
-					if currentBlockType != "tool_use_"+toolID {
+					// Update tool call info if provided
+					if toolID != "" {
+						state.ID = toolID
+					}
+					if toolName != "" {
+						state.Name = toolName
+					}
+
+					// Start tool use block if not yet started and we have ID
+					if !state.Started && state.ID != "" {
 						// Stop previous block if needed
 						if currentBlockType != "" {
 							blockStop := anthropic.MessageStreamEventUnion{
@@ -480,7 +524,8 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 							currentBlockIndex++
 						}
 
-						currentBlockType = "tool_use_" + toolID
+						currentBlockType = "tool_use_" + state.ID
+						state.Started = true
 
 						// Start tool use block
 						blockStart := anthropic.MessageStreamEventUnion{
@@ -488,8 +533,8 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 							Index: currentBlockIndex,
 							ContentBlock: anthropic.ContentBlockStartEventContentBlockUnion{
 								Type:  "tool_use",
-								ID:    toolID,
-								Name:  toolName,
+								ID:    state.ID,
+								Name:  state.Name,
 								Input: json.RawMessage("{}"),
 							},
 						}
@@ -566,6 +611,12 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 				sendSSEEvent(w, "message_stop", msgStop)
 			}
 		}
+	}
+
+	// Check for scanner errors
+	if err := scanner.Err(); err != nil {
+		utils.L().Errorf("Error reading stream: %v", err)
+		return err
 	}
 
 	return nil
