@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -152,10 +153,10 @@ func (r *GeminiRequest) toGenAIContents() []*genai.Content {
 }
 
 type ServerV2 struct {
-	sr            *router.SmartRouterV2
-	registry      *manager.Registry
-	router        *chi.Mux
-	adminHandler  *AdminHandler
+	sr           *router.SmartRouterV2
+	registry     *manager.Registry
+	router       *chi.Mux
+	adminHandler *AdminHandler
 }
 
 func NewServerV2(sr *router.SmartRouterV2, registry *manager.Registry, cfg *config.Config) *ServerV2 {
@@ -467,13 +468,17 @@ func (s *ServerV2) HandleListModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create response in OpenAI format with enhanced specifications
+	// Compatible with both OpenAI and Claude clients
 	data := make([]map[string]interface{}, 0, len(models))
 	for _, model := range models {
 		modelInfo := map[string]interface{}{
-			"id":       model,
-			"object":   "model",
-			"created":  0,
-			"owned_by": "omniproxy",
+			"id":           model,
+			"object":       "model",
+			"created":      0,
+			"owned_by":     "omniproxy",
+			"created_at":   time.Now().Format(time.RFC3339),
+			"display_name": model,
+			"type":         "model",
 		}
 
 		// Add enhanced specifications if available
