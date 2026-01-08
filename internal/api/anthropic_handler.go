@@ -57,41 +57,77 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 	for _, msg := range anthropicReq.Messages {
 		role := msg.Role
 		if role == "user" {
-			// Build content parts for user message
-			var contentParts []openai.ChatCompletionContentPartUnionParam
-
-			// Handle content blocks
+			// Check if this is a tool result message
+			hasToolResult := false
 			for _, block := range msg.Content {
-				if textBlock := block.OfText; textBlock != nil {
-					contentParts = append(contentParts, openai.TextContentPart(textBlock.Text))
-				} else if imageBlock := block.OfImage; imageBlock != nil {
-					// Convert image to OpenAI format
-					imageURL := ""
-					if source := imageBlock.Source.OfBase64; source != nil {
-						imageURL = fmt.Sprintf("data:%s;base64,%s", source.MediaType, source.Data)
-					} else if source := imageBlock.Source.OfURL; source != nil {
-						imageURL = source.URL
-					}
-					contentParts = append(contentParts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
-						URL: imageURL,
-					}))
+				if block.OfToolResult != nil {
+					hasToolResult = true
+					break
 				}
 			}
 
-			// Create user message with content parts
-			if len(contentParts) == 0 {
-				// Empty content - use empty string
-				messages = append(messages, openai.UserMessage(""))
-			} else if len(contentParts) == 1 {
-				// Single content part - can use simplified form
-				if textPart := contentParts[0].OfText; textPart != nil {
-					messages = append(messages, openai.UserMessage(textPart.Text))
-				} else {
-					messages = append(messages, openai.UserMessage(contentParts))
+			if hasToolResult {
+				// Handle tool result messages - convert to OpenAI tool messages
+				// In Anthropic, tool results are sent as user messages with tool_result blocks
+				// In OpenAI, each tool result needs to be a separate tool message
+				for _, block := range msg.Content {
+					if toolResultBlock := block.OfToolResult; toolResultBlock != nil {
+						// Convert tool result to OpenAI tool message
+						var content string
+						
+						// Handle content parts
+						for _, contentPart := range toolResultBlock.Content {
+							if textPart := contentPart.OfText; textPart != nil {
+								// If we already have content, append with newline
+								if content != "" {
+									content += "\n"
+								}
+								content += textPart.Text
+							}
+						}
+
+						// Create tool message
+						messages = append(messages, openai.ToolMessage(content, toolResultBlock.ToolUseID))
+					}
 				}
 			} else {
-				// Multiple content parts - use array form
-				messages = append(messages, openai.UserMessage(contentParts))
+				// Regular user message
+				// Build content parts for user message
+				var contentParts []openai.ChatCompletionContentPartUnionParam
+
+				// Handle content blocks
+				for _, block := range msg.Content {
+					if textBlock := block.OfText; textBlock != nil {
+						contentParts = append(contentParts, openai.TextContentPart(textBlock.Text))
+					} else if imageBlock := block.OfImage; imageBlock != nil {
+						// Convert image to OpenAI format
+						imageURL := ""
+						if source := imageBlock.Source.OfBase64; source != nil {
+							imageURL = fmt.Sprintf("data:%s;base64,%s", source.MediaType, source.Data)
+						} else if source := imageBlock.Source.OfURL; source != nil {
+							imageURL = source.URL
+						}
+						contentParts = append(contentParts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+							URL: imageURL,
+						}))
+					}
+				}
+
+				// Create user message with content parts
+				if len(contentParts) == 0 {
+					// Empty content - use empty string
+					messages = append(messages, openai.UserMessage(""))
+				} else if len(contentParts) == 1 {
+					// Single content part - can use simplified form
+					if textPart := contentParts[0].OfText; textPart != nil {
+						messages = append(messages, openai.UserMessage(textPart.Text))
+					} else {
+						messages = append(messages, openai.UserMessage(contentParts))
+					}
+				} else {
+					// Multiple content parts - use array form
+					messages = append(messages, openai.UserMessage(contentParts))
+				}
 			}
 		} else if role == "assistant" {
 			// Handle assistant message with potential tool calls
