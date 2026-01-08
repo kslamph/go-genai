@@ -41,9 +41,6 @@ func (p *AntigravityProvider) createGenAIClient(ctx context.Context, projectID s
 		Backend:     genai.BackendAntigravity,
 		Project:     projectID,
 		Credentials: creds,
-		HTTPOptions: genai.HTTPOptions{
-			BaseURL: AntigravityBaseURL,
-		},
 	})
 }
 

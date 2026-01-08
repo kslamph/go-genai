@@ -242,8 +242,14 @@ func (a *AntigravityCredentialInitializer) configureAntigravityCredential(cred *
 	}
 	cred.ProjectID = projectID
 
-	if expiry := helper.GetExpiryDate(); expiry > 0 {
-		cred.Expiry = time.Unix(expiry, 0)
+	expiry := helper.GetExpiryDate()
+	if expiry > 0 {
+		// expiry_date is in milliseconds, convert to seconds
+		cred.Expiry = time.Unix(expiry/1000, 0)
+		utils.L().Infow("[DEBUG] configureAntigravityCredential",
+			"expiry_raw_ms", expiry,
+			"expiry_date", cred.Expiry.Format(time.RFC3339),
+			"creds_path", helper.GetCredentialsPath())
 	} else {
 		cred.Expiry = time.Now().Add(1 * time.Hour)
 	}

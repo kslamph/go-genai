@@ -401,12 +401,14 @@ func (m *Manager) refreshAntigravityClient(ctx context.Context, cred *Credential
 	}
 
 	// Refresh the client with new token
+	// Note: Don't set BaseURL explicitly - let the genai library handle it automatically
+	// This matches the POC behavior where BaseURL is not set
 	err := cred.clientPool.RefreshClient(
 		ctx,
 		tokenProvider,
 		projectID,
 		genai.BackendAntigravity, // Use Antigravity backend
-		"https://daily-cloudcode-pa.sandbox.googleapis.com", // Antigravity base URL
+		"", // Empty BaseURL - let library auto-detect
 	)
 
 	if err != nil {
