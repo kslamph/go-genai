@@ -126,6 +126,7 @@ func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
 		"kimi-k2",
 		"glm-4.6",
 		"glm-4.7",
+		"minimax-m2.1",
 		"deepseek-v3.2",
 		"deepseek-r1",
 		"deepseek-v3",
