@@ -15,6 +15,7 @@ import (
 	"github.com/sunbankio/omniproxy/internal/provider/antigravity"
 	"github.com/sunbankio/omniproxy/internal/provider/gemini"
 	"github.com/sunbankio/omniproxy/internal/provider/iflow"
+	kiro "github.com/sunbankio/omniproxy/internal/provider/kiro"
 	"github.com/sunbankio/omniproxy/internal/provider/qwen"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 	"google.golang.org/genai"
@@ -38,6 +39,7 @@ func NewCredentialFactory() *CredentialFactory {
 			auth.ProviderTypeAntigravity: NewAntigravityCredentialInitializer(),
 			auth.ProviderTypeQwen:        NewQwenCredentialInitializer(),
 			auth.ProviderTypeIFlow:       NewIFlowCredentialInitializer(),
+			auth.ProviderTypeKiro:        NewKiroCredentialInitializer(),
 		},
 	}
 }
@@ -422,6 +424,84 @@ func (i *IFlowCredentialInitializer) Initialize(ctx context.Context, cfg *config
 			registry.RegisterCredential(cred, models)
 
 			utils.L().Infof("Loaded IFlow credential: %s with %d models: %v", credID, len(models), models)
+		}
+	}
+	return nil
+}
+
+// KiroCredentialInitializer
+type KiroCredentialInitializer struct {
+	*BaseCredentialInitializer
+}
+
+func NewKiroCredentialInitializer() *KiroCredentialInitializer {
+	homeDir, _ := os.UserHomeDir()
+	defaultCredsPath := filepath.Join(homeDir, ".aws", "sso", "cache", "kiro-auth-token.json")
+	return &KiroCredentialInitializer{
+		BaseCredentialInitializer: &BaseCredentialInitializer{
+			providerType:     provider.ProviderKiro,
+			authProviderType: auth.ProviderTypeKiro,
+			defaultCredsPath: defaultCredsPath,
+		},
+	}
+}
+
+func (k *KiroCredentialInitializer) Initialize(ctx context.Context, cfg *config.Config, registry *Registry, authManager auth.AuthManager) error {
+	paths := k.getCredentialPaths(cfg)
+	for idx, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			// Use DefaultOAuthConfig and override the creds path
+			defaultConfig := kiro.DefaultOAuthConfig()
+			defaultConfig.CredsPath = path
+
+			helper := kiro.NewAuthenticator(defaultConfig)
+
+			token, err := helper.GetToken(ctx)
+			if err != nil {
+				utils.L().Warnf("Failed to get token for Kiro credential from %s: %v", path, err)
+				continue
+			}
+
+			credID := fmt.Sprintf("kiro-%d", idx)
+			cred := auth.NewCredential(credID, auth.ProviderTypeKiro)
+			cred.AccessToken = token
+
+			// Try to get expiry from file
+			if data, err := os.ReadFile(path); err == nil {
+				var kiroCreds struct {
+					ExpiresAt string `json:"expiresAt"`
+				}
+				if json.Unmarshal(data, &kiroCreds) == nil && kiroCreds.ExpiresAt != "" {
+					// Parse RFC3339 timestamp
+					if expiryTime, parseErr := time.Parse(time.RFC3339, kiroCreds.ExpiresAt); parseErr == nil {
+						cred.Expiry = expiryTime
+					} else {
+						// Fallback to 1 hour if we can't parse the expiry
+						cred.Expiry = time.Now().Add(1 * time.Hour)
+					}
+				}
+			}
+			if cred.Expiry.IsZero() {
+				cred.Expiry = time.Now().Add(1 * time.Hour)
+			}
+
+			// Store the authenticator instance for token refresh operations
+			cred.SetAuthenticator(helper)
+
+			// Create and set the provider instance
+			kiroProvider := kiro.NewProvider(credID, helper)
+			cred.SetProvider(kiroProvider)
+
+			// Get models from the provider
+			models, err := kiroProvider.ListModels(ctx)
+			if err != nil {
+				utils.L().Warnf("Failed to get models for Kiro credential %s: %v", credID, err)
+				// Fallback to default models
+				models = []string{"claude-opus-4-5", "claude-haiku-4-5", "claude-sonnet-4-5"}
+			}
+			registry.RegisterCredential(cred, models)
+
+			utils.L().Infof("Loaded Kiro credential: %s with %d models: %v", credID, len(models), models)
 		}
 	}
 	return nil

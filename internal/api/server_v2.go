@@ -430,8 +430,8 @@ func (s *ServerV2) HandleListModels(w http.ResponseWriter, r *http.Request) {
 		if pool != nil {
 			creds := pool.List()
 			if len(creds) > 0 {
-				// Only include models from Qwen or IFlow providers
-				if creds[0].ProviderType == auth.ProviderTypeQwen || creds[0].ProviderType == auth.ProviderTypeIFlow {
+				// Only include models from Qwen, IFlow, or Kiro providers
+				if creds[0].ProviderType == auth.ProviderTypeQwen || creds[0].ProviderType == auth.ProviderTypeIFlow || creds[0].ProviderType == auth.ProviderTypeKiro {
 					models = append(models, model)
 				}
 			}
@@ -444,28 +444,36 @@ func (s *ServerV2) HandleListModels(w http.ResponseWriter, r *http.Request) {
 		maxTokens     int
 		description   string
 	}{
-		"qwen3-coder-plus":           {1048576, 65536, "480B MoE coding model"},
-		"qwen3-coder-flash":          {1048576, 65536, "Fast coding model with same specs as Plus"},
-		"qwen3-vl-plus":              {262144, 32768, "Vision-language model"},
-		"qwen3-max":                  {262144, 32768, "Advanced Qwen3 model"},
-		"qwen3-max-preview":          {262144, 32768, "Preview version of Qwen3 Max"},
-		"kimi-k2-instruct-0905":      {262144, 65536, "320B MoE instruction model"},
-		"kimi-k2":                    {131072, 65536, "1T MoE foundation model"},
-		"deepseek-v3.2-exp":          {131072, 65536, "Experimental sparse attention model"},
-		"deepseek-r1":                {131072, 32768, "Reasoning-optimized model"},
-		"deepseek-v3-671b":           {131072, 32768, "671B parameter model"},
-		"glm-4.6":                    {204800, 131072, "Thinking-enabled multimodal model"},
-		"qwen3-32b":                  {131072, 32768, "32B parameter model"},
-		"qwen3-235b-a22b-thinking":   {262144, 65536, "Thinking MoE model"},
-		"qwen3-235b-a22b-instruct":   {262144, 65536, "Instruction-tuned MoE model"},
-		"qwen3-235b-a22b":            {131072, 32768, "Base MoE model"},
-		"chat_20706":                 {131072, 32768, "Chat model variant"},
-		"chat_23310":                 {131072, 32768, "Chat model variant"},
-		"rev19-uic3-1p":              {131072, 32768, "Specialized model"},
-		"gpt-oss-120b-medium":        {131072, 32768, "Open-source 120B model"},
-		"claude-opus-4-5-thinking":   {131072, 32768, "Thinking-enhanced Claude"},
-		"claude-sonnet-4-5":          {131072, 32768, "Advanced Claude model"},
+		"qwen3-coder-plus":         {1048576, 65536, "480B MoE coding model"},
+		"qwen3-coder-flash":        {1048576, 65536, "Fast coding model with same specs as Plus"},
+		"qwen3-vl-plus":            {262144, 32768, "Vision-language model"},
+		"qwen3-max":                {262144, 32768, "Advanced Qwen3 model"},
+		"qwen3-max-preview":        {262144, 32768, "Preview version of Qwen3 Max"},
+		"kimi-k2-instruct-0905":    {262144, 65536, "320B MoE instruction model"},
+		"kimi-k2":                  {131072, 65536, "1T MoE foundation model"},
+		"deepseek-v3.2-exp":        {131072, 65536, "Experimental sparse attention model"},
+		"deepseek-r1":              {131072, 32768, "Reasoning-optimized model"},
+		"deepseek-v3-671b":         {131072, 32768, "671B parameter model"},
+		"glm-4.6":                  {204800, 131072, "Thinking-enabled multimodal model"},
+		"qwen3-32b":                {131072, 32768, "32B parameter model"},
+		"qwen3-235b-a22b-thinking": {262144, 65536, "Thinking MoE model"},
+		"qwen3-235b-a22b-instruct": {262144, 65536, "Instruction-tuned MoE model"},
+		"qwen3-235b-a22b":          {131072, 32768, "Base MoE model"},
+		"chat_20706":               {131072, 32768, "Chat model variant"},
+		"chat_23310":               {131072, 32768, "Chat model variant"},
+		"rev19-uic3-1p":            {131072, 32768, "Specialized model"},
+		"gpt-oss-120b-medium":      {131072, 32768, "Open-source 120B model"},
+		"claude-opus-4-5-thinking": {131072, 32768, "Thinking-enhanced Claude"},
+		// "claude-sonnet-4-5":          {131072, 32768, "Advanced Claude model"},
 		"claude-sonnet-4-5-thinking": {131072, 32768, "Thinking-enhanced Sonnet"},
+		// Kiro models
+		"claude-opus-4-5":            {131072, 32768, "Most capable Claude model"},
+		"claude-opus-4-5-20251101":   {131072, 32768, "Most capable Claude model (2025-11-01)"},
+		"claude-haiku-4-5":           {131072, 32768, "Fast and efficient Claude model"},
+		"claude-sonnet-4-5":          {131072, 32768, "Balanced Claude model"},
+		"claude-sonnet-4-5-20250929": {131072, 32768, "Balanced Claude model (2025-09-29)"},
+		"claude-sonnet-4-20250514":   {131072, 32768, "Sonnet 4 model"},
+		"claude-3-7-sonnet-20250219": {131072, 32768, "Sonnet 3.7 model"},
 	}
 
 	// Create response in OpenAI format with enhanced specifications

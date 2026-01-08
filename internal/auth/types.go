@@ -18,6 +18,7 @@ const (
 	ProviderTypeAntigravity
 	ProviderTypeQwen
 	ProviderTypeIFlow
+	ProviderTypeKiro
 )
 
 // String returns the string representation of ProviderType
@@ -33,6 +34,8 @@ func (p ProviderType) String() string {
 		return "Qwen"
 	case ProviderTypeIFlow:
 		return "IFlow"
+	case ProviderTypeKiro:
+		return "Kiro"
 	default:
 		return "Unknown"
 	}
@@ -111,6 +114,8 @@ func (c *Credential) Type() provider.ProviderType {
 		return provider.ProviderQwen
 	case ProviderTypeIFlow:
 		return provider.ProviderIFlow
+	case ProviderTypeKiro:
+		return provider.ProviderKiro
 	default:
 		return provider.ProviderOpenAI // fallback
 	}
@@ -130,7 +135,7 @@ func NewCredential(id string, providerType ProviderType) *Credential {
 // This method provides compatibility with the BaseProvider interface
 func (c *Credential) SupportedProtocols() []provider.Protocol {
 	switch c.ProviderType {
-	case ProviderTypeOpenAI, ProviderTypeQwen, ProviderTypeIFlow:
+	case ProviderTypeOpenAI, ProviderTypeQwen, ProviderTypeIFlow, ProviderTypeKiro:
 		return []provider.Protocol{provider.ProtocolOpenAI}
 	case ProviderTypeGemini, ProviderTypeAntigravity:
 		return []provider.Protocol{provider.ProtocolGemini}

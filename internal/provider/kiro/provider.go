@@ -111,6 +111,10 @@ func (p *Provider) chatCompletionInternal(ctx context.Context, req *ChatRequest)
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
+	// Debug: print the request for debugging
+	reqJSON, _ := json.MarshalIndent(kiroReq, "  ", "  ")
+	fmt.Printf("[Kiro DEBUG] Request:\n%s\n", string(reqJSON))
+
 	// Build URL
 	url := fmt.Sprintf(KiroBaseURL, p.region) + GenerateEndpoint
 

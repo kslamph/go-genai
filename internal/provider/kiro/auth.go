@@ -230,6 +230,11 @@ func (a *Authenticator) GetToken(ctx context.Context) (string, error) {
 	return a.credentials.AccessToken, nil
 }
 
+// RefreshAccessToken refreshes the OAuth token using the refresh token (public method)
+func (a *Authenticator) RefreshAccessToken(ctx context.Context) error {
+	return a.refreshAccessToken(ctx)
+}
+
 // refreshAccessToken refreshes the OAuth token using the refresh token
 func (a *Authenticator) refreshAccessToken(ctx context.Context) error {
 	if a.credentials == nil || a.credentials.RefreshToken == "" {
@@ -239,6 +244,16 @@ func (a *Authenticator) refreshAccessToken(ctx context.Context) error {
 	region := a.credentials.Region
 	if region == "" {
 		region = a.config.Region
+	}
+	if region == "" && a.credentials.ProfileArn != "" {
+		// Extract region from profileArn (e.g., "arn:aws:codewhisperer:us-east-1:...")
+		parts := strings.Split(a.credentials.ProfileArn, ":")
+		if len(parts) >= 4 {
+			region = parts[3]
+		}
+	}
+	if region == "" {
+		region = "us-east-1" // Final fallback
 	}
 
 	// Determine refresh URL based on auth method

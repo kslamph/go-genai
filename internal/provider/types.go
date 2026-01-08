@@ -9,4 +9,5 @@ const (
 	ProviderQwen        ProviderType = "qwen"
 	ProviderIFlow       ProviderType = "iflow"
 	ProviderOpenAI      ProviderType = "openai" //not in use currently
+	ProviderKiro        ProviderType = "kiro"
 )

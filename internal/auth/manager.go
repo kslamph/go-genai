@@ -12,6 +12,7 @@ import (
 	"github.com/sunbankio/omniproxy/internal/provider/antigravity"
 	"github.com/sunbankio/omniproxy/internal/provider/gemini"
 	"github.com/sunbankio/omniproxy/internal/provider/iflow"
+	kiro "github.com/sunbankio/omniproxy/internal/provider/kiro"
 	"github.com/sunbankio/omniproxy/internal/provider/qwen"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 )
@@ -107,6 +108,8 @@ func (m *Manager) ForceRefresh(ctx context.Context, cred *Credential) error {
 		return m.refreshQwenToken(ctx, cred)
 	case ProviderTypeAntigravity:
 		return m.refreshAntigravityToken(ctx, cred)
+	case ProviderTypeKiro:
+		return m.refreshKiroToken(ctx, cred)
 	case ProviderTypeOpenAI:
 		// OpenAI doesn't use OAuth, no refresh needed
 		return nil
@@ -136,6 +139,8 @@ func (m *Manager) RefreshClient(ctx context.Context, cred *Credential) error {
 		return m.refreshQwenClient(cred)
 	case ProviderTypeAntigravity:
 		return m.refreshAntigravityClient(ctx, cred)
+	case ProviderTypeKiro:
+		return m.refreshKiroClient(cred)
 	case ProviderTypeOpenAI:
 		// OpenAI client recreation logic would go here
 		return nil
@@ -418,6 +423,98 @@ func (m *Manager) refreshAntigravityClient(ctx context.Context, cred *Credential
 	utils.L().Infow("Successfully refreshed Antigravity client",
 		"credential_id", cred.ID,
 		"project_id", projectID)
+
+	return nil
+}
+
+func (m *Manager) refreshKiroToken(ctx context.Context, cred *Credential) error {
+	// Get the stored authenticator from the credential
+	authInterface := cred.GetAuthenticator()
+	if authInterface == nil {
+		return fmt.Errorf("no authenticator stored in credential %s", cred.ID)
+	}
+
+	// Import kiro package
+	kiroAuth, ok := authInterface.(*kiro.Authenticator)
+	if !ok {
+		return fmt.Errorf("invalid authenticator type for credential %s", cred.ID)
+	}
+
+	// Force refresh the token using RefreshAccessToken
+	if err := kiroAuth.RefreshAccessToken(ctx); err != nil {
+		return fmt.Errorf("failed to refresh Kiro token: %w", err)
+	}
+
+	// Update the credential with the refreshed token information
+	cred.mu.Lock()
+	defer cred.mu.Unlock()
+
+	// Get the refreshed token
+	token, err := kiroAuth.GetToken(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get refreshed Kiro token: %w", err)
+	}
+
+	// Update credential fields
+	cred.AccessToken = token
+
+	// Read actual expiry from the authenticator's credentials
+	kiroCredsPath := kiroAuth.GetCredentialsPath()
+	if kiroCredsPath != "" {
+		// Read the credentials file to get the actual expiry
+		data, readErr := os.ReadFile(kiroCredsPath)
+		if readErr == nil {
+			var kiroCreds struct {
+				ExpiresAt string `json:"expiresAt"`
+			}
+			if jsonErr := json.Unmarshal(data, &kiroCreds); jsonErr == nil && kiroCreds.ExpiresAt != "" {
+				// Parse RFC3339 timestamp
+				if expiryTime, parseErr := time.Parse(time.RFC3339, kiroCreds.ExpiresAt); parseErr == nil {
+					cred.Expiry = expiryTime
+				} else {
+					// Fallback to 1 hour if we can't parse the expiry
+					cred.Expiry = time.Now().Add(1 * time.Hour)
+				}
+			} else {
+				// Fallback to 1 hour if we can't read the expiry
+				cred.Expiry = time.Now().Add(1 * time.Hour)
+			}
+		} else {
+			// Fallback to 1 hour if we can't read the file
+			cred.Expiry = time.Now().Add(1 * time.Hour)
+		}
+	} else {
+		// Fallback to 1 hour if we can't get the credentials path
+		cred.Expiry = time.Now().Add(1 * time.Hour)
+	}
+
+	utils.L().Infow("Successfully refreshed Kiro token",
+		"credential_id", cred.ID,
+		"expiry", cred.Expiry)
+
+	return nil
+}
+
+func (m *Manager) refreshKiroClient(cred *Credential) error {
+	// Get the stored authenticator from the credential
+	authInterface := cred.GetAuthenticator()
+	if authInterface == nil {
+		return fmt.Errorf("no authenticator stored in credential %s", cred.ID)
+	}
+
+	kiroAuth, ok := authInterface.(*kiro.Authenticator)
+	if !ok {
+		return fmt.Errorf("invalid authenticator type for credential %s", cred.ID)
+	}
+
+	// Create a new provider instance with the refreshed authenticator
+	kiroProvider := kiro.NewProvider(cred.ID, kiroAuth)
+
+	// Update the credential with the new provider instance
+	cred.SetProvider(kiroProvider)
+
+	utils.L().Infow("Successfully refreshed Kiro provider",
+		"credential_id", cred.ID)
 
 	return nil
 }
