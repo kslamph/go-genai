@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sashabaranov/go-openai"
+	"github.com/openai/openai-go/v3"
 	"github.com/sunbankio/omniproxy/internal/auth"
 	"github.com/sunbankio/omniproxy/internal/manager"
 	"github.com/sunbankio/omniproxy/internal/provider"
@@ -490,11 +490,11 @@ func (r *SmartRouterV2) executeOpenAI(ctx context.Context, cred *auth.Credential
 	}
 
 	// Parse the payload as OpenAI request
-	var openAIReq openai.ChatCompletionRequest
+	var openAIReq openai.ChatCompletionNewParams
 	switch p := req.Payload.(type) {
-	case *openai.ChatCompletionRequest:
+	case *openai.ChatCompletionNewParams:
 		openAIReq = *p
-	case openai.ChatCompletionRequest:
+	case openai.ChatCompletionNewParams:
 		openAIReq = p
 	default:
 		// Try to decode from JSON
@@ -515,11 +515,8 @@ func (r *SmartRouterV2) executeOpenAI(ctx context.Context, cred *auth.Credential
 		}
 	}
 
-	// Override stream setting from request
-	openAIReq.Stream = req.IsStream
-
 	// Execute the request based on whether it's streaming
-	if openAIReq.Stream {
+	if req.IsStream {
 		return r.executeOpenAIStream(ctx, cred, openaiProvider, openAIReq)
 	} else {
 		return r.executeOpenAINonStream(ctx, cred, openaiProvider, openAIReq)
@@ -527,11 +524,9 @@ func (r *SmartRouterV2) executeOpenAI(ctx context.Context, cred *auth.Credential
 }
 
 // executeOpenAINonStream executes a non-streaming OpenAI request
-func (r *SmartRouterV2) executeOpenAINonStream(ctx context.Context, cred *auth.Credential, openaiProvider provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) (*Response, error) {
+func (r *SmartRouterV2) executeOpenAINonStream(ctx context.Context, cred *auth.Credential, openaiProvider provider.OpenAICompatibleProvider, req openai.ChatCompletionNewParams) (*Response, error) {
 	utils.L().Infow("Starting OpenAI non-streaming request (V2)",
 		"model", req.Model,
-		"stream", req.Stream,
-		"num_messages", len(req.Messages),
 		"provider", string(cred.Type()),
 		"provider_name", cred.Name())
 
@@ -559,11 +554,9 @@ func (r *SmartRouterV2) executeOpenAINonStream(ctx context.Context, cred *auth.C
 }
 
 // executeOpenAIStream executes a streaming OpenAI request
-func (r *SmartRouterV2) executeOpenAIStream(ctx context.Context, cred *auth.Credential, openaiProvider provider.OpenAICompatibleProvider, req openai.ChatCompletionRequest) (*Response, error) {
+func (r *SmartRouterV2) executeOpenAIStream(ctx context.Context, cred *auth.Credential, openaiProvider provider.OpenAICompatibleProvider, req openai.ChatCompletionNewParams) (*Response, error) {
 	utils.L().Infow("Starting OpenAI streaming request (V2)",
 		"model", req.Model,
-		"stream", req.Stream,
-		"num_messages", len(req.Messages),
 		"provider", string(cred.Type()),
 		"provider_name", cred.Name())
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/sashabaranov/go-openai"
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 )
 
@@ -77,10 +77,10 @@ type OpenAICompatibleProvider interface {
 
 	// ChatCompletion handles a single chat request using OpenAI format
 	// Returns interface{} to allow providers to return custom response types
-	ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error)
+	ChatCompletion(ctx context.Context, req openai.ChatCompletionNewParams) (interface{}, error)
 
 	// StreamChatCompletion handles a streaming chat request using OpenAI format
-	StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error, error)
+	StreamChatCompletion(ctx context.Context, req openai.ChatCompletionNewParams) (<-chan openai.ChatCompletionChunk, <-chan error, error)
 }
 
 // GeminiNativeProvider is for providers using the genai package (gemini, antigravity)

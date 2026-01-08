@@ -9,7 +9,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.19.0
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/gofrs/flock v0.12.1
-	github.com/sashabaranov/go-openai v1.41.2
+	github.com/openai/openai-go/v3 v3.15.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/oauth2 v0.30.0
 	google.golang.org/genai v0.0.0-20260102085516-e5276502d3ca

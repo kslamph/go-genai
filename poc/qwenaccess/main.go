@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/sashabaranov/go-openai"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	qwenprovider "github.com/sunbankio/omniproxy/internal/provider/qwen"
 )
 
@@ -36,23 +37,19 @@ func main() {
 	fmt.Printf("Access token obtained successfully\n")
 
 	// Create OpenAI client configured for Qwen
-	clientConfig := openai.DefaultConfig(token)
-	clientConfig.BaseURL = "https://portal.qwen.ai/v1"
-	client := openai.NewClientWithConfig(clientConfig)
+	client := openai.NewClient(
+		option.WithAPIKey(token),
+		option.WithBaseURL("https://portal.qwen.ai/v1"),
+	)
 
 	// Test with qwen3-coder-flash model
 	model := "qwen3-coder-flash"
 
 	// Test 1: Simple completion
 	fmt.Printf("\nTesting simple completion with model: %s\n", model)
-	resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model: model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: "Explain Go pointers in one sentence.",
-			},
-		},
+	resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model:     openai.ChatModel(model),
+		Messages:  []openai.ChatCompletionMessageParamUnion{openai.UserMessage("Explain Go pointers in one sentence.")},
 	})
 
 	if err != nil {
@@ -68,45 +65,24 @@ func main() {
 	fmt.Printf("\nTesting streaming completion with model: %s\n", model)
 	fmt.Print("Streamed Response: ")
 
-	stream, err := client.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
-		Model: model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: "Write a short Go function to reverse a string.",
-			},
-		},
+	stream := client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
+		Model:    openai.ChatModel(model),
+		Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("Write a short Go function to reverse a string.")},
 	})
 
-	if err != nil {
-		log.Printf("Stream creation failed: %v", err)
-		return
-	}
-	defer stream.Close()
-
-	for {
-		resp, err := stream.Recv()
-		if err != nil {
-			log.Printf("Stream failed: %v", err)
-			break
-		}
-
-		if len(resp.Choices) > 0 {
-			fmt.Print(resp.Choices[0].Delta.Content)
+	for stream.Next() {
+		chunk := stream.Current()
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			fmt.Print(chunk.Choices[0].Delta.Content)
 		}
 	}
 	fmt.Println("\nDone.")
 
 	// Test 3: Code generation
 	fmt.Printf("\nTesting code generation with model: %s\n", model)
-	codeResp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model: model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: "Write a Go function that implements binary search for a sorted slice of integers.",
-			},
-		},
+	codeResp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model:    openai.ChatModel(model),
+		Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("Write a Go function that implements binary search for a sorted slice of integers.")},
 	})
 
 	if err != nil {

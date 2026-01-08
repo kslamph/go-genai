@@ -4,12 +4,13 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/sashabaranov/go-openai"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"github.com/sunbankio/omniproxy/internal/provider"
 )
 
 type Provider struct {
-	client *openai.Client
+	client openai.Client
 	name   string
 }
 
@@ -17,11 +18,11 @@ type Provider struct {
 var _ provider.OpenAICompatibleProvider = (*Provider)(nil)
 
 func NewProvider(name string, apiKey string, baseURL string) *Provider {
-	config := openai.DefaultConfig(apiKey)
+	opts := []option.RequestOption{option.WithAPIKey(apiKey)}
 	if baseURL != "" {
-		config.BaseURL = baseURL
+		opts = append(opts, option.WithBaseURL(baseURL))
 	}
-	client := openai.NewClientWithConfig(config)
+	client := openai.NewClient(opts...)
 	return &Provider{
 		client: client,
 		name:   name,
@@ -40,42 +41,35 @@ func (p *Provider) SupportedProtocols() []provider.Protocol {
 	return []provider.Protocol{provider.ProtocolOpenAI}
 }
 
-func (p *Provider) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (interface{}, error) {
-	resp, err := p.client.CreateChatCompletion(ctx, req)
+func (p *Provider) ChatCompletion(ctx context.Context, req openai.ChatCompletionNewParams) (interface{}, error) {
+	resp, err := p.client.Chat.Completions.New(ctx, req)
 	if err != nil {
 		return nil, p.wrapError(err)
 	}
-	return &resp, nil
+	return resp, nil
 }
 
-func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan openai.ChatCompletionStreamResponse, <-chan error, error) {
-	stream, err := p.client.CreateChatCompletionStream(ctx, req)
-	if err != nil {
-		return nil, nil, p.wrapError(err)
-	}
+func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatCompletionNewParams) (<-chan openai.ChatCompletionChunk, <-chan error, error) {
+	stream := p.client.Chat.Completions.NewStreaming(ctx, req)
 
-	respChan := make(chan openai.ChatCompletionStreamResponse)
+	respChan := make(chan openai.ChatCompletionChunk)
 	errChan := make(chan error, 1)
 
 	go func() {
 		defer close(respChan)
 		defer close(errChan)
-		defer stream.Close()
 
-		for {
+		for stream.Next() {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				response, err := stream.Recv()
-				if err != nil {
-					if err.Error() != "EOF" {
-						errChan <- err
-					}
-					return
-				}
-				respChan <- response
+				respChan <- stream.Current()
 			}
+		}
+
+		if err := stream.Err(); err != nil && err.Error() != "EOF" {
+			errChan <- err
 		}
 	}()
 
@@ -83,12 +77,12 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 }
 
 func (p *Provider) ListModels(ctx context.Context) ([]string, error) {
-	resp, err := p.client.ListModels(ctx)
+	resp, err := p.client.Models.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var models []string
-	for _, m := range resp.Models {
+	for _, m := range resp.Data {
 		models = append(models, m.ID)
 	}
 	return models, nil
@@ -108,19 +102,14 @@ func (p *Provider) SupportsModel(model string) bool {
 	return false
 }
 
-// wrapError converts go-openai errors to ProviderError with proper status codes
+// wrapError converts openai-go errors to ProviderError with proper status codes
 func (p *Provider) wrapError(err error) error {
-	// Check if it's an APIError from go-openai
-	if apiErr, ok := err.(*openai.APIError); ok {
-		return provider.NewProviderError(apiErr.HTTPStatusCode, apiErr.Message, p.name, map[string]interface{}{
+	// Check if it's an APIError from openai-go
+	if apiErr, ok := err.(*openai.Error); ok {
+		return provider.NewProviderError(int(apiErr.StatusCode), apiErr.Message, p.name, map[string]interface{}{
 			"type": apiErr.Type,
 			"code": apiErr.Code,
 		})
-	}
-
-	// Check if it's a RequestError
-	if reqErr, ok := err.(*openai.RequestError); ok {
-		return provider.NewProviderError(reqErr.HTTPStatusCode, reqErr.Err.Error(), p.name, nil)
 	}
 
 	// Fallback to generic 500 error

@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/sashabaranov/go-openai"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	iflowprovider "github.com/sunbankio/omniproxy/internal/provider/iflow"
 )
 
@@ -39,89 +40,33 @@ func main() {
 	fmt.Printf("API key obtained successfully\n")
 
 	// Create OpenAI client configured for iFlow using bearer token
-	clientConfig := openai.DefaultConfig(apiKey)
-	clientConfig.BaseURL = "https://apis.iflow.cn/v1" // Set iFlow API endpoint
-	client := openai.NewClientWithConfig(clientConfig)
+	client := openai.NewClient(
+		option.WithAPIKey(apiKey),
+		option.WithBaseURL("https://apis.iflow.cn/v1"),
+	)
 
 	// Test with qwen3-max model
 	model := "glm-4.6"
 
-	// Test 1: Simple completion
-	// fmt.Printf("\nTesting simple completion with model: %s\n", model)
-	// resp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-	// 	Model: model,
-	// 	Messages: []openai.ChatCompletionMessage{
-	// 		{
-	// 			Role:    openai.ChatMessageRoleUser,
-	// 			Content: "Explain Go pointers in one sentence.",
-	// 		},
-	// 	},
-	// })
-
-	// if err != nil {
-	// 	log.Printf("Chat completion failed: %v", err)
-	// 	return
-	// }
-
-	// if len(resp.Choices) > 0 {
-	// 	fmt.Printf("Response: %s\n", resp.Choices[0].Message.Content)
-	// }
-
-	// Test 2: Streaming completion
+	// Streaming completion
 	fmt.Printf("\nTesting streaming completion with model: %s\n", model)
 	fmt.Print("Streamed Response: ")
 
-	stream, err := client.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
-		Model: model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: "Write a short Go function to reverse a string.",
-			},
-		},
+	stream := client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
+		Model:    openai.ChatModel(model),
+		Messages: []openai.ChatCompletionMessageParamUnion{openai.UserMessage("Write a short Go function to reverse a string.")},
 	})
 
-	if err != nil {
-		log.Printf("Stream creation failed: %v", err)
-		return
-	}
-	defer stream.Close()
-
-	for {
-		resp, err := stream.Recv()
-		if err != nil {
-			// NOTE: iFlow API deliberately sends EOF error at end of stream
-			// This is expected behavior and should be handled gracefully in production
-			log.Printf("Stream failed: %v", err)
-			break
+	for stream.Next() {
+		chunk := stream.Current()
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			fmt.Print(chunk.Choices[0].Delta.Content)
 		}
-
-		if len(resp.Choices) > 0 {
-			fmt.Print(resp.Choices[0].Delta.Content)
-		}
-		// fmt.Println("\nDone.")
 	}
 
-	// // Test 3: Code generation
-	// fmt.Printf("\nTesting code generation with model: %s\n", model)
-	// codeResp, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-	// 	Model: model,
-	// 	Messages: []openai.ChatCompletionMessage{
-	// 		{
-	// 			Role:    openai.ChatMessageRoleUser,
-	// 			Content: "Write a Go function that implements binary search for a sorted slice of integers.",
-	// 		},
-	// 	},
-	// })
-
-	// if err != nil {
-	// 	log.Printf("Code generation failed: %v", err)
-	// 	return
-	// }
-
-	// if len(codeResp.Choices) > 0 {
-	// 	fmt.Printf("Generated Code:\n%s\n", codeResp.Choices[0].Message.Content)
-	// }
+	if err := stream.Err(); err != nil {
+		log.Printf("Stream error: %v", err)
+	}
 
 	fmt.Println("\n=== All tests completed ===")
 }
