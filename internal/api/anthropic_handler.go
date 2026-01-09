@@ -64,18 +64,32 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 		if role == "user" {
 			// Check if this is a tool result message
 			hasToolResult := false
+			var textContent string
 			for _, block := range msg.Content {
 				if block.OfToolResult != nil {
 					hasToolResult = true
-					break
+				}
+				if textBlock := block.OfText; textBlock != nil {
+					textContent += textBlock.Text
 				}
 			}
 
 			if hasToolResult {
+				utils.L().Debugw("Converting user message with tool results",
+					"has_text_content", textContent != "",
+					"text_length", len(textContent),
+					"num_blocks", len(msg.Content))
 				// Handle tool result messages - convert to OpenAI tool messages
 				// In Anthropic, tool results are sent as user messages with tool_result blocks
 				// In OpenAI, each tool result needs to be a separate tool message
 				// Note: OpenAI tool messages only support text content, not images
+				
+				// First, add any text content as a user message (if present)
+				if textContent != "" {
+					messages = append(messages, openai.UserMessage(textContent))
+				}
+				
+				// Then, convert tool_result blocks to OpenAI tool messages
 				for _, block := range msg.Content {
 					if toolResultBlock := block.OfToolResult; toolResultBlock != nil {
 						// Convert tool result to OpenAI tool message
@@ -107,6 +121,10 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 						}
 					}
 				}
+				
+				utils.L().Debugw("Converted user message with tool results",
+					"added_user_message", textContent != "",
+					"num_tool_messages", len(msg.Content))
 			} else {
 				// Regular user message
 				// Build content parts for user message
