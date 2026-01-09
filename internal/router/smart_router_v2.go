@@ -95,7 +95,19 @@ func (r *SmartRouterV2) Execute(ctx context.Context, req *Request) (*Response, e
 		}
 	}
 
-	// 4. Execute Request
+	// 4. Auto-detect protocol from credential's supported protocols
+	// This ensures that Antigravity credentials use ProtocolGemini instead of ProtocolOpenAI
+	providerInstance := cred.GetProvider()
+	if providerInstance != nil {
+		supportedProtocols := providerInstance.SupportedProtocols()
+		if len(supportedProtocols) > 0 {
+			// Use the first supported protocol from the credential
+			req.Protocol = supportedProtocols[0]
+			utils.L().Debugf("Auto-detected protocol %s for credential %s (provider: %s)", req.Protocol, cred.ID, cred.ProviderType)
+		}
+	}
+
+	// 5. Execute Request
 	resp, err := r.executeWithCredential(ctx, cred, req)
 
 	// Check retry count to prevent infinite loops

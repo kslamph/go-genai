@@ -386,7 +386,7 @@ func (s *ServerV2) HandleOpenAIChatCompletions(w http.ResponseWriter, r *http.Re
 	}
 
 	req := &router.Request{
-		Protocol: provider.ProtocolOpenAI,
+		Protocol: "", // Let router auto-detect protocol from credential
 		Model:    model,
 		Payload:  payload,
 		IsStream: isStream,

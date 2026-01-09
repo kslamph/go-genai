@@ -11,7 +11,6 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/param"
-	"github.com/sunbankio/omniproxy/internal/provider"
 	"github.com/sunbankio/omniproxy/internal/router"
 	"github.com/sunbankio/omniproxy/pkg/utils"
 )
@@ -702,7 +701,7 @@ func (s *ServerV2) HandleAnthropicMessages(w http.ResponseWriter, r *http.Reques
 
 	// Create router request
 	routerReq := &router.Request{
-		Protocol: provider.ProtocolOpenAI,
+		Protocol: "", // Let router auto-detect protocol from credential
 		Model:    string(anthropicReq.Model),
 		Payload:  openAIReq,
 		IsStream: isStream,
