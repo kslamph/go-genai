@@ -231,8 +231,8 @@ func testMultiturnWithSingleToolOpenAI(ctx context.Context, p *kiropkg.Provider)
 				"content": "",
 				"tool_calls": []map[string]interface{}{
 					{
-						"id":    toolCallID,
-						"type":  "function",
+						"id":   toolCallID,
+						"type": "function",
 						"function": map[string]interface{}{
 							"name":      "get_weather",
 							"arguments": `{"location": "Tokyo"}`,
@@ -367,8 +367,8 @@ func testMultiturnWithSingleToolKiro(ctx context.Context, p *kiropkg.Provider) {
 				"content": "",
 				"tool_calls": []map[string]interface{}{
 					{
-						"id":    toolCallID,
-						"type":  "function",
+						"id":   toolCallID,
+						"type": "function",
 						"function": map[string]interface{}{
 							"name":      "get_weather",
 							"arguments": `{"location": "Paris"}`,
@@ -514,8 +514,8 @@ func testMultiturnWithMultipleTools(ctx context.Context, p *kiropkg.Provider) {
 
 		for i, tc := range toolCalls {
 			assistantMsg["tool_calls"].([]map[string]interface{})[i] = map[string]interface{}{
-				"id":    tc.ID,
-				"type":  "function",
+				"id":   tc.ID,
+				"type": "function",
 				"function": map[string]interface{}{
 					"name":      tc.Function.Name,
 					"arguments": tc.Function.Arguments,

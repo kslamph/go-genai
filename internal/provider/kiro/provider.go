@@ -564,12 +564,49 @@ func (p *Provider) streamChatCompletionInternal(ctx context.Context, req *ChatRe
 func streamEventStream(reader io.Reader, eventChan chan<- StreamEvent) error {
 	bufReader := bufio.NewReader(reader)
 
+	// Buffer for accumulating content chunks
+	var contentBuffer strings.Builder
+	var lastToolUseID string
+	var lastToolName string
+	var toolInputBuffer strings.Builder
+
+	// Flush buffered content as a single event
+	flushContent := func() {
+		if contentBuffer.Len() > 0 {
+			eventChan <- StreamEvent{
+				Type: "content",
+				Content: map[string]interface{}{
+					"content": contentBuffer.String(),
+				},
+			}
+			contentBuffer.Reset()
+		}
+	}
+
+	// Flush buffered tool input as a single event
+	flushToolInput := func(toolUseID, toolName string) {
+		if toolInputBuffer.Len() > 0 {
+			eventChan <- StreamEvent{
+				Type: "tool_use_input",
+				Content: map[string]interface{}{
+					"toolUseId": toolUseID,
+					"name":      toolName,
+					"input":     toolInputBuffer.String(),
+				},
+			}
+			toolInputBuffer.Reset()
+		}
+	}
+
 	for {
 		// Read total length (4 bytes)
 		lenBuf := make([]byte, 4)
 		_, err := io.ReadFull(bufReader, lenBuf)
 		if err != nil {
 			if err == io.EOF {
+				// Flush any remaining buffered content before exiting
+				flushContent()
+				flushToolInput(lastToolUseID, lastToolName)
 				return nil
 			}
 			return fmt.Errorf("failed to read length: %w", err)
@@ -602,6 +639,9 @@ func streamEventStream(reader io.Reader, eventChan chan<- StreamEvent) error {
 		_, err = io.ReadFull(bufReader, payload)
 		if err != nil {
 			if err == io.EOF {
+				// Flush any remaining buffered content before exiting
+				flushContent()
+				flushToolInput(lastToolUseID, lastToolName)
 				return nil
 			}
 			return fmt.Errorf("failed to read payload: %w", err)
@@ -619,9 +659,61 @@ func streamEventStream(reader io.Reader, eventChan chan<- StreamEvent) error {
 			continue
 		}
 
-		// Send event to channel
+		eventType := determineEventType(event)
+
+		// Handle content buffering
+		if eventType == "content" {
+			if content, ok := event["content"].(string); ok {
+				contentBuffer.WriteString(content)
+				// Don't send immediately - accumulate content
+				// We'll flush when we hit a non-content event or at the end
+			}
+			continue
+		}
+
+		// Flush any buffered content before sending non-content events
+		flushContent()
+
+		// Handle tool_use events
+		if eventType == "tool_use" {
+			if name, ok := event["name"].(string); ok {
+				if toolUseID, ok := event["toolUseId"].(string); ok {
+					// Flush any previous tool input buffer
+					flushToolInput(lastToolUseID, lastToolName)
+
+					lastToolUseID = toolUseID
+					lastToolName = name
+
+					// Send the tool_use header event (with name and id)
+					eventChan <- StreamEvent{
+						Type:    "tool_use",
+						Content: event,
+					}
+
+					// If there's initial input, buffer it
+					if input, ok := event["input"].(string); ok && input != "" {
+						toolInputBuffer.WriteString(input)
+					}
+					continue
+				}
+			}
+		}
+
+		// Handle tool_use_input events
+		if eventType == "tool_use_input" {
+			if input, ok := event["input"].(string); ok {
+				toolInputBuffer.WriteString(input)
+				// Don't send immediately - accumulate tool input
+				continue
+			}
+		}
+
+		// Flush any buffered tool input before sending other events
+		flushToolInput(lastToolUseID, lastToolName)
+
+		// Send other events directly (usage, tool_use_stop, etc.)
 		eventChan <- StreamEvent{
-			Type:    determineEventType(event),
+			Type:    eventType,
 			Content: event,
 		}
 	}

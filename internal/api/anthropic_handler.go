@@ -82,12 +82,12 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 				// In Anthropic, tool results are sent as user messages with tool_result blocks
 				// In OpenAI, each tool result needs to be a separate tool message
 				// Note: OpenAI tool messages only support text content, not images
-				
+
 				// First, add any text content as a user message (if present)
 				if textContent != "" {
 					messages = append(messages, openai.UserMessage(textContent))
 				}
-				
+
 				// Then, convert tool_result blocks to OpenAI tool messages
 				for _, block := range msg.Content {
 					if toolResultBlock := block.OfToolResult; toolResultBlock != nil {
@@ -120,7 +120,7 @@ func convertAnthropicRequestToOpenAI(anthropicReq anthropic.MessageNewParams) (*
 						}
 					}
 				}
-				
+
 				utils.L().Debugw("Converted user message with tool results",
 					"added_user_message", textContent != "",
 					"num_tool_messages", len(msg.Content))
@@ -392,14 +392,14 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 
 	// Use bufio to read lines for SSE format handling
 	scanner := bufio.NewScanner(openAIStream)
-	
+
 	currentBlockIndex := int64(0)
 	currentBlockType := ""
 	messageID := ""
 	model := ""
 	inputTokens := int64(0)
 	outputTokens := int64(0)
-	
+
 	// Track tool calls by index for streaming
 	type toolCallState struct {
 		ID      string
@@ -411,12 +411,12 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		
+
 		// Skip empty lines
 		if line == "" {
 			continue
 		}
-		
+
 		// Handle SSE format: strip "data: " prefix
 		if strings.HasPrefix(line, "data: ") {
 			line = strings.TrimPrefix(line, "data: ")
@@ -426,12 +426,12 @@ func handleAnthropicStreaming(w http.ResponseWriter, openAIStream io.ReadCloser)
 			// Skip non-data lines (like comments, event types, etc.)
 			continue
 		}
-		
+
 		// Skip "[DONE]" marker
 		if line == "[DONE]" {
 			break
 		}
-		
+
 		// Parse JSON
 		var openAIChunk openai.ChatCompletionChunk
 		if err := json.Unmarshal([]byte(line), &openAIChunk); err != nil {
