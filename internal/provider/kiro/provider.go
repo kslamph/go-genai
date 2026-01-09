@@ -139,7 +139,7 @@ func (p *Provider) chatCompletionInternal(ctx context.Context, req *ChatRequest)
 	logContent += fmt.Sprintf("\n2. OUR REQUEST TO KIRO API:\n")
 	url := fmt.Sprintf(KiroBaseURL, p.region) + GenerateEndpoint
 	logContent += fmt.Sprintf("   URL: %s\n", url)
-	logContent += fmt.Sprintf("   Headers: Content-Type=application/json, Accept=application/vnd.amazon.eventstream\n")
+	logContent += fmt.Sprintf("   Headers: Content-Type=application/json, Accept=application/json\n")
 	logContent += fmt.Sprintf("   Body:\n%s\n", string(reqJSON))
 
 	if err := os.WriteFile(logFile, []byte(logContent), 0644); err != nil {
@@ -154,8 +154,8 @@ func (p *Provider) chatCompletionInternal(ctx context.Context, req *ChatRequest)
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set headers (streaming required for EventStream format)
-	p.setHeaders(httpReq, token, true)
+	// Set headers (non-streaming mode)
+	p.setHeaders(httpReq, token, false)
 
 	// Send request
 	client := &http.Client{Timeout: 60 * time.Second}
@@ -401,18 +401,18 @@ func parseEventStreamResponse(reader io.Reader) (*KiroResponse, error) {
 func logDecodedEvents(events []map[string]interface{}) {
 	timestamp := time.Now().Format("20060102-150405.000")
 	logFile := fmt.Sprintf("./logs/kiro-decoded-events-%s.log", timestamp)
-	
+
 	var logContent strings.Builder
 	logContent.WriteString(fmt.Sprintf("=== Kiro Decoded EventStream Events at %s ===\n\n", timestamp))
 	logContent.WriteString(fmt.Sprintf("Total Events: %d\n\n", len(events)))
-	
+
 	for i, event := range events {
 		eventJSON, _ := json.MarshalIndent(event, "", "  ")
 		logContent.WriteString(fmt.Sprintf("Event %d:\n%s\n\n", i, string(eventJSON)))
 	}
-	
+
 	logContent.WriteString("=== End of Decoded Events ===\n")
-	
+
 	if err := os.WriteFile(logFile, []byte(logContent.String()), 0644); err != nil {
 		fmt.Printf("[Kiro DEBUG] Failed to write decoded events log: %v\n", err)
 	} else {
@@ -494,8 +494,8 @@ func (p *Provider) streamChatCompletionInternal(ctx context.Context, req *ChatRe
 		fmt.Printf("[Kiro DEBUG] Request logged to: %s\n", logFile)
 	}
 
-	// Build URL
-	url := fmt.Sprintf(KiroBaseURL, p.region) + StreamingEndpoint
+	// Build URL - use same endpoint as non-streaming, just with streaming headers
+	url := fmt.Sprintf(KiroBaseURL, p.region) + GenerateEndpoint
 
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
@@ -522,7 +522,7 @@ func (p *Provider) streamChatCompletionInternal(ctx context.Context, req *ChatRe
 		if err != nil {
 			return nil, nil, fmt.Errorf("request failed with status %d: failed to read error body", resp.StatusCode)
 		}
-		
+
 		// Log the error response
 		logContent += fmt.Sprintf("\n=== Kiro Response ===\n")
 		logContent += fmt.Sprintf("Status Code: %d\n", resp.StatusCode)
@@ -531,77 +531,120 @@ func (p *Provider) streamChatCompletionInternal(ctx context.Context, req *ChatRe
 			logContent += fmt.Sprintf("  %s: %v\n", k, v)
 		}
 		logContent += fmt.Sprintf("\nError Body (JSON): %s\n", string(errorBody))
-		
+
 		// Write error log
 		if err := os.WriteFile(logFile, []byte(logContent), 0644); err != nil {
 			fmt.Printf("[Kiro DEBUG] Failed to write error log: %v\n", err)
 		}
-		
+
 		return nil, nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(errorBody))
 	}
 
-	// Read response body for logging (only for successful responses)
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		resp.Body.Close()
-		return nil, nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-	resp.Body.Close()
-
-	// Log Kiro's response
-	logContent += fmt.Sprintf("\n=== Kiro Response ===\n")
-	logContent += fmt.Sprintf("Status Code: %d\n", resp.StatusCode)
-	logContent += fmt.Sprintf("Headers:\n")
-	for k, v := range resp.Header {
-		logContent += fmt.Sprintf("  %s: %v\n", k, v)
-	}
-	logContent += fmt.Sprintf("\nResponse Body (raw binary EventStream, %d bytes):\n", len(respBody))
-	logContent += "[Binary EventStream data - not human-readable]\n"
-
-	eventChan := make(chan StreamEvent)
+	// Create channels for streaming response
+	eventChan := make(chan StreamEvent, 10)
 	errChan := make(chan error, 1)
 
-	// Capture stream events for logging
-	var capturedEvents []StreamEvent
-
+	// Stream EventStream response and convert to StreamEvent incrementally
 	go func() {
 		defer close(eventChan)
+		defer close(errChan)
+		defer resp.Body.Close()
 
-		// Re-create reader for parsing
-		reader := bytes.NewReader(respBody)
-		if err := p.parseEventStream(reader, eventChan); err != nil && err != io.EOF {
-			logContent += fmt.Sprintf("\nError parsing event stream: %v\n", err)
+		// Parse EventStream incrementally and send events as they arrive
+		if err := streamEventStream(resp.Body, eventChan); err != nil && err != io.EOF {
+			logContent += fmt.Sprintf("\nError streaming event stream: %v\n", err)
 			errChan <- err
 		}
 	}()
 
-	// Capture all events for logging
-	go func() {
-		for event := range eventChan {
-			capturedEvents = append(capturedEvents, event)
-		}
-	}()
-
-	// Wait for events to be processed and then log them
-	go func() {
-		time.Sleep(2 * time.Second) // Give time to capture all events
-
-		// Log captured events from Kiro
-		logContent += "\n=== Captured Stream Events from Kiro ===\n"
-		for i, event := range capturedEvents {
-			eventJSON, _ := json.MarshalIndent(event, "  ", "  ")
-			logContent += fmt.Sprintf("Event %d (Type: %s):\n%s\n\n", i, event.Type, string(eventJSON))
-		}
-
-		// Write to file
-		if err := os.WriteFile(logFile, []byte(logContent), 0644); err != nil {
-			fmt.Printf("[Kiro DEBUG] Failed to write log file: %v\n", err)
-		} else {
-			fmt.Printf("[Kiro DEBUG] Request logged to: %s\n", logFile)
-		}
-	}()
-
 	return eventChan, errChan, nil
+}
+
+// streamEventStream reads Kiro's EventStream and sends events incrementally
+func streamEventStream(reader io.Reader, eventChan chan<- StreamEvent) error {
+	bufReader := bufio.NewReader(reader)
+
+	for {
+		// Read total length (4 bytes)
+		lenBuf := make([]byte, 4)
+		_, err := io.ReadFull(bufReader, lenBuf)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("failed to read length: %w", err)
+		}
+		totalLen := binary.BigEndian.Uint32(lenBuf)
+
+		// Read header length (4 bytes)
+		_, err = io.ReadFull(bufReader, lenBuf)
+		if err != nil {
+			return fmt.Errorf("failed to read header length: %w", err)
+		}
+		headerLen := binary.BigEndian.Uint32(lenBuf)
+
+		// Skip prelude CRC (4 bytes)
+		if _, err = bufReader.Discard(4); err != nil {
+			return fmt.Errorf("failed to skip prelude CRC: %w", err)
+		}
+
+		// Skip header (headerLen bytes)
+		if _, err = bufReader.Discard(int(headerLen)); err != nil {
+			return fmt.Errorf("failed to skip header: %w", err)
+		}
+
+		// Read payload
+		payloadLen := int(totalLen) - 16 - int(headerLen)
+		if payloadLen < 0 {
+			return fmt.Errorf("invalid payload length: %d", payloadLen)
+		}
+		payload := make([]byte, payloadLen)
+		_, err = io.ReadFull(bufReader, payload)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("failed to read payload: %w", err)
+		}
+
+		// Skip message CRC (4 bytes)
+		if _, err = bufReader.Discard(4); err != nil {
+			return fmt.Errorf("failed to skip message CRC: %w", err)
+		}
+
+		// Parse payload as JSON
+		var event map[string]interface{}
+		if err := json.Unmarshal(payload, &event); err != nil {
+			fmt.Printf("[Kiro DEBUG] Failed to parse EventStream payload as JSON: %v\n", err)
+			continue
+		}
+
+		// Send event to channel
+		eventChan <- StreamEvent{
+			Type:    determineEventType(event),
+			Content: event,
+		}
+	}
+}
+
+// determineEventType determines the type of Kiro event
+func determineEventType(event map[string]interface{}) string {
+	if _, ok := event["content"].(string); ok {
+		return "content"
+	}
+	if _, ok := event["name"].(string); ok {
+		if _, ok := event["input"].(string); ok {
+			return "tool_use_input"
+		}
+		if _, ok := event["stop"].(bool); ok {
+			return "tool_use_stop"
+		}
+		return "tool_use"
+	}
+	if _, ok := event["usage"].(float64); ok {
+		return "usage"
+	}
+	return "unknown"
 }
 
 // setHeaders sets the required HTTP headers for Kiro requests
@@ -885,19 +928,19 @@ func (p *Provider) parseEventStream(reader io.Reader, eventChan chan<- StreamEve
 func logStreamingDecodedEvents(events []map[string]interface{}) {
 	timestamp := time.Now().Format("20060102-150405.000")
 	logFile := fmt.Sprintf("./logs/kiro-streaming-events-%s.log", timestamp)
-	
+
 	var logContent strings.Builder
 	logContent.WriteString(fmt.Sprintf("=== Kiro Streaming Decoded EventStream Events at %s ===\n\n", timestamp))
 	logContent.WriteString(fmt.Sprintf("Total Events: %d\n\n", len(events)))
-	
+
 	for i, event := range events {
 		eventType := getEventType(event)
 		eventJSON, _ := json.MarshalIndent(event, "", "  ")
 		logContent.WriteString(fmt.Sprintf("Event %d (Type: %s):\n%s\n\n", i, eventType, string(eventJSON)))
 	}
-	
+
 	logContent.WriteString("=== End of Streaming Decoded Events ===\n")
-	
+
 	if err := os.WriteFile(logFile, []byte(logContent.String()), 0644); err != nil {
 		fmt.Printf("[Kiro DEBUG] Failed to write streaming decoded events log: %v\n", err)
 	} else {
