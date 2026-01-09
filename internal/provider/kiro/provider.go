@@ -114,7 +114,7 @@ func (p *Provider) chatCompletionInternal(ctx context.Context, req *ChatRequest)
 
 	// Debug: write comprehensive request/response logging
 	timestamp := time.Now().Format("20060102-150405.000")
-	logFile := fmt.Sprintf("/tmp/kiro-request-%s.log", timestamp)
+	logFile := fmt.Sprintf("./logs/kiro-request-%s.log", timestamp)
 
 	// 1. LOG USER'S ORIGINAL REQUEST
 	logContent := fmt.Sprintf("=== COMPREHENSIVE KIRO DEBUG LOG at %s ===\n\n", timestamp)
@@ -280,6 +280,8 @@ func parseEventStreamResponse(reader io.Reader) (*KiroResponse, error) {
 	var usage float64
 	// Map to accumulate tool call arguments by ID
 	toolCallMap := make(map[string]*ToolCallAccumulator)
+	// Track all decoded events for logging
+	var decodedEvents []map[string]interface{}
 
 	for {
 		// Read total length (4 bytes)
@@ -339,6 +341,9 @@ func parseEventStreamResponse(reader io.Reader) (*KiroResponse, error) {
 			continue
 		}
 
+		// Store decoded event for logging
+		decodedEvents = append(decodedEvents, event)
+
 		// Extract content (concatenate all content events)
 		if c, ok := event["content"].(string); ok {
 			content += c
@@ -382,11 +387,37 @@ func parseEventStreamResponse(reader io.Reader) (*KiroResponse, error) {
 	// Convert accumulated tool calls to ToolUse format
 	toolUses = convertAccumulatedToolCalls(toolCallMap)
 
+	// Log all decoded events to file
+	logDecodedEvents(decodedEvents)
+
 	return &KiroResponse{
 		Content:  content,
 		ToolUses: toolUses,
 		Usage:    usage,
 	}, nil
+}
+
+// logDecodedEvents logs all decoded EventStream events to a file
+func logDecodedEvents(events []map[string]interface{}) {
+	timestamp := time.Now().Format("20060102-150405.000")
+	logFile := fmt.Sprintf("./logs/kiro-decoded-events-%s.log", timestamp)
+	
+	var logContent strings.Builder
+	logContent.WriteString(fmt.Sprintf("=== Kiro Decoded EventStream Events at %s ===\n\n", timestamp))
+	logContent.WriteString(fmt.Sprintf("Total Events: %d\n\n", len(events)))
+	
+	for i, event := range events {
+		eventJSON, _ := json.MarshalIndent(event, "", "  ")
+		logContent.WriteString(fmt.Sprintf("Event %d:\n%s\n\n", i, string(eventJSON)))
+	}
+	
+	logContent.WriteString("=== End of Decoded Events ===\n")
+	
+	if err := os.WriteFile(logFile, []byte(logContent.String()), 0644); err != nil {
+		fmt.Printf("[Kiro DEBUG] Failed to write decoded events log: %v\n", err)
+	} else {
+		fmt.Printf("[Kiro DEBUG] Decoded events logged to: %s\n", logFile)
+	}
 }
 
 // convertAccumulatedToolCalls converts the accumulated tool calls to ToolUse format
@@ -447,7 +478,7 @@ func (p *Provider) streamChatCompletionInternal(ctx context.Context, req *ChatRe
 	// Debug: write the full request to a log file
 	reqJSON, _ := json.MarshalIndent(kiroReq, "  ", "  ")
 	timestamp := time.Now().Format("20060102-150405.000")
-	logFile := fmt.Sprintf("/tmp/kiro-request-%s.log", timestamp)
+	logFile := fmt.Sprintf("./logs/kiro-request-%s.log", timestamp)
 	logContent := fmt.Sprintf("=== Kiro Request at %s ===\n\n", timestamp)
 	logContent += fmt.Sprintf("Full Kiro Request:\n%s\n\n", string(reqJSON))
 	logContent += fmt.Sprintf("Original OpenAI Request Messages:\n")
@@ -482,9 +513,37 @@ func (p *Provider) streamChatCompletionInternal(ctx context.Context, req *ChatRe
 		return nil, nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
-	// Read response body for logging
+	// Check HTTP status code BEFORE reading body
+	// IMPORTANT: Kiro returns JSON error responses for 4xx/5xx, NOT EventStream
+	if resp.StatusCode != http.StatusOK {
+		// Read error body (JSON format)
+		errorBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, nil, fmt.Errorf("request failed with status %d: failed to read error body", resp.StatusCode)
+		}
+		
+		// Log the error response
+		logContent += fmt.Sprintf("\n=== Kiro Response ===\n")
+		logContent += fmt.Sprintf("Status Code: %d\n", resp.StatusCode)
+		logContent += fmt.Sprintf("Headers:\n")
+		for k, v := range resp.Header {
+			logContent += fmt.Sprintf("  %s: %v\n", k, v)
+		}
+		logContent += fmt.Sprintf("\nError Body (JSON): %s\n", string(errorBody))
+		
+		// Write error log
+		if err := os.WriteFile(logFile, []byte(logContent), 0644); err != nil {
+			fmt.Printf("[Kiro DEBUG] Failed to write error log: %v\n", err)
+		}
+		
+		return nil, nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(errorBody))
+	}
+
+	// Read response body for logging (only for successful responses)
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		resp.Body.Close()
 		return nil, nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 	resp.Body.Close()
@@ -675,7 +734,7 @@ func (p *Provider) StreamChatCompletion(ctx context.Context, req openai.ChatComp
 			}
 
 			if latestFile != "" {
-				logFile = "/tmp/" + latestFile
+				logFile = "./logs/" + latestFile
 
 				// Read existing log
 				existingContent, err := os.ReadFile(logFile)
@@ -740,6 +799,8 @@ func (p *Provider) wrapError(err error) error {
 // parseEventStream parses the AWS EventStream response
 func (p *Provider) parseEventStream(reader io.Reader, eventChan chan<- StreamEvent) error {
 	bufReader := bufio.NewReader(reader)
+	// Track all decoded events for logging
+	var decodedEvents []map[string]interface{}
 
 	for {
 		// Read total length (4 bytes)
@@ -747,7 +808,7 @@ func (p *Provider) parseEventStream(reader io.Reader, eventChan chan<- StreamEve
 		_, err := io.ReadFull(bufReader, lenBuf)
 		if err != nil {
 			if err == io.EOF {
-				return nil
+				break
 			}
 			return fmt.Errorf("failed to read length: %w", err)
 		}
@@ -781,7 +842,7 @@ func (p *Provider) parseEventStream(reader io.Reader, eventChan chan<- StreamEve
 		_, err = io.ReadFull(bufReader, payload)
 		if err != nil {
 			if err == io.EOF {
-				return nil
+				break
 			}
 			return fmt.Errorf("failed to read payload: %w", err)
 		}
@@ -798,14 +859,49 @@ func (p *Provider) parseEventStream(reader io.Reader, eventChan chan<- StreamEve
 			// Try to parse as SSE format
 			if sseEvent := parseSSEEvent(payload); sseEvent != nil {
 				eventChan <- *sseEvent
+				decodedEvents = append(decodedEvents, sseEvent.Content)
 			}
 			continue
 		}
+
+		// Store decoded event for logging
+		decodedEvents = append(decodedEvents, event)
 
 		eventChan <- StreamEvent{
 			Type:    getEventType(event),
 			Content: event,
 		}
+	}
+
+	// Log all decoded events for streaming
+	if len(decodedEvents) > 0 {
+		logStreamingDecodedEvents(decodedEvents)
+	}
+
+	return nil
+}
+
+// logStreamingDecodedEvents logs all decoded EventStream events for streaming to a file
+func logStreamingDecodedEvents(events []map[string]interface{}) {
+	timestamp := time.Now().Format("20060102-150405.000")
+	logFile := fmt.Sprintf("./logs/kiro-streaming-events-%s.log", timestamp)
+	
+	var logContent strings.Builder
+	logContent.WriteString(fmt.Sprintf("=== Kiro Streaming Decoded EventStream Events at %s ===\n\n", timestamp))
+	logContent.WriteString(fmt.Sprintf("Total Events: %d\n\n", len(events)))
+	
+	for i, event := range events {
+		eventType := getEventType(event)
+		eventJSON, _ := json.MarshalIndent(event, "", "  ")
+		logContent.WriteString(fmt.Sprintf("Event %d (Type: %s):\n%s\n\n", i, eventType, string(eventJSON)))
+	}
+	
+	logContent.WriteString("=== End of Streaming Decoded Events ===\n")
+	
+	if err := os.WriteFile(logFile, []byte(logContent.String()), 0644); err != nil {
+		fmt.Printf("[Kiro DEBUG] Failed to write streaming decoded events log: %v\n", err)
+	} else {
+		fmt.Printf("[Kiro DEBUG] Streaming decoded events logged to: %s\n", logFile)
 	}
 }
 
@@ -1932,23 +2028,11 @@ func convertStreamEventToOpenAIChunk(event StreamEvent, state *kiroStreamState) 
 					toolCall["function"] = map[string]interface{}{}
 				}
 
-				// Handle initial input if present
+				// Handle initial input if present - only include arguments when there's content
 				if input, ok := event.Content["input"].(string); ok && input != "" {
 					toolCall["function"].(map[string]interface{})["arguments"] = input
-				} else {
-					// Ensure arguments field exists for structure if it's the first packet?
-					// OpenAI expects 'arguments' string delta. Empty string is valid delta.
-					// Only send empty string if we are sending the header, to avoid sending "arguments": "" repeatedly?
-					// Actually, an empty arguments delta is harmless.
-					// But we should only send it if we have nothing else?
-					// Let's send it to be safe if it's the header packet.
-					if !state.sentToolCallIDs[toolUseID] { // wait, we just set it to true above
-						// Check if we JUST set it.
-						// Actually, better logic:
-						// Always init "arguments" to "" if we are sending header, so client knows it starts?
-						// No, OpenAI sends arguments in chunks.
-					}
 				}
+				// Note: Do NOT include empty arguments field - per reference spec
 
 				chunkMap["choices"].([]map[string]interface{})[0]["delta"].(map[string]interface{})["tool_calls"] = []map[string]interface{}{toolCall}
 				shouldSend = true
@@ -1983,7 +2067,7 @@ func convertStreamEventToOpenAIChunk(event StreamEvent, state *kiroStreamState) 
 	case "usage":
 		if usage, ok := event.Content["usage"].(float64); ok {
 			chunkMap["usage"] = map[string]interface{}{
-				"total_tokens": int(usage),
+				"total_tokens": usage, // Keep as float64
 			}
 			shouldSend = true
 		}
